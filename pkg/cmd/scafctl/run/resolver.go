@@ -27,7 +27,6 @@ import (
 	"github.com/oakwood-commons/scafctl/pkg/solution/execute"
 	"github.com/oakwood-commons/scafctl/pkg/solution/get"
 	"github.com/oakwood-commons/scafctl/pkg/solution/inspect"
-	"github.com/oakwood-commons/scafctl/pkg/state"
 	"github.com/oakwood-commons/scafctl/pkg/terminal"
 	"github.com/oakwood-commons/scafctl/pkg/terminal/writer"
 	"github.com/spf13/cobra"
@@ -336,7 +335,7 @@ func (o *ResolverOptions) Run(ctx context.Context) error {
 	}
 
 	// Prepare solution: load, set up registry, handle bundles
-	sol, reg, solutionDir, cleanup, err := o.prepareSolutionForExecution(ctx)
+	sol, reg, solutionDir, cleanup, providerCtx, err := o.prepareSolutionForExecution(ctx)
 	if err != nil {
 		// When no -f/--file was provided, auto-discovery failed to find a
 		// solution file, and the first positional arg looks like a catalog
@@ -345,13 +344,16 @@ func (o *ResolverOptions) Run(ctx context.Context) error {
 			o.File = o.Names[0]
 			o.Names = o.Names[1:]
 			lgr.V(1).Info("retrying with first positional arg as catalog reference", "file", o.File)
-			sol, reg, solutionDir, cleanup, err = o.prepareSolutionForExecution(ctx)
+			sol, reg, solutionDir, cleanup, providerCtx, err = o.prepareSolutionForExecution(ctx)
 		}
 		if err != nil {
 			return o.exitWithCode(ctx, err, exitcode.FileNotFound)
 		}
 	}
 	defer cleanup()
+	if providerCtx != nil {
+		ctx = providerCtx(ctx)
+	}
 
 	// Set the solution directory for resolver-phase path resolution.
 	// --base-dir takes precedence; otherwise use the solution file's directory.
@@ -448,44 +450,12 @@ func (o *ResolverOptions) Run(ctx context.Context) error {
 
 	// Snapshot mode: execute resolvers and save snapshot
 	if o.Snapshot {
-		// Load state before snapshot execution so state provider has context.
-		// State is intentionally NOT saved in snapshot mode because snapshots
-		// are read-only inspections that should not mutate persisted state.
-		if sol.State != nil {
-			snapshotMgr := state.NewManager(sol.State, reg, settings.VersionInformation.BuildVersion)
-			loadResult, loadErr := snapshotMgr.Load(ctx, params, buildCommandInfo("run resolver", params))
-			if loadErr != nil {
-				return o.exitWithCode(ctx, fmt.Errorf("state load: %w", loadErr), exitcode.GeneralError)
-			}
-			if !loadResult.Skipped {
-				ctx = loadResult.Ctx
-			}
-		}
 		return o.showResolverSnapshot(ctx, sol, resolvers, params, reg)
 	}
 
 	// Wire skip-transform flag into shared options for executeResolvers
 	if o.SkipTransform {
 		o.sharedResolverOptions.SkipTransform = true
-	}
-
-	// State lifecycle: load persisted state before resolver execution so that
-	// the state provider can serve previously saved values.
-	// params are passed so that state backend inputs can reference CLI
-	// parameters via __params in CEL expressions (e.g. __params.appName).
-	var stateMgr *state.Manager
-	var stateData *state.Data
-	if sol.State != nil {
-		stateMgr = state.NewManager(sol.State, reg, settings.VersionInformation.BuildVersion)
-		cmdInfo := buildCommandInfo("run resolver", params)
-		loadResult, loadErr := stateMgr.Load(ctx, params, cmdInfo)
-		if loadErr != nil {
-			return o.exitWithCode(ctx, fmt.Errorf("state load: %w", loadErr), exitcode.GeneralError)
-		}
-		if !loadResult.Skipped {
-			ctx = loadResult.Ctx
-			stateData = loadResult.Data
-		}
 	}
 
 	// Track timing
@@ -498,15 +468,6 @@ func (o *ResolverOptions) Run(ctx context.Context) error {
 	}
 
 	elapsed := time.Since(start)
-
-	// State lifecycle: save resolver values marked with saveToState.
-	if stateMgr != nil && stateData != nil {
-		allResolvers := sol.Spec.ResolversToSlice()
-		solMeta := buildStateSolutionMeta(sol)
-		if saveErr := stateMgr.Save(ctx, stateData, resolverCtx, allResolvers, params, resolverData, solMeta); saveErr != nil {
-			return o.exitWithCode(ctx, fmt.Errorf("state save: %w", saveErr), exitcode.GeneralError)
-		}
-	}
 
 	// Build output and write
 	results := o.buildResolverOutputMap(resolverData, sol)
