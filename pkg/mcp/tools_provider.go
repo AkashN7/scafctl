@@ -5,14 +5,53 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/oakwood-commons/scafctl/pkg/celexp"
 	"github.com/oakwood-commons/scafctl/pkg/provider"
 	provdetail "github.com/oakwood-commons/scafctl/pkg/provider/detail"
 	"github.com/oakwood-commons/scafctl/pkg/provider/official"
+	"github.com/oakwood-commons/scafctl/pkg/solution"
 	"github.com/oakwood-commons/scafctl/pkg/solution/inspect"
 )
+
+// ensureProvider attempts to auto-resolve a provider that is not in the
+// registry by looking it up in the official provider registry and loading
+// it via the plugin pool. On success, returns a non-nil release function
+// that the caller must defer. Returns an error if the provider cannot be resolved.
+func (s *Server) ensureProvider(ctx context.Context, name string) (release func(), err error) {
+	if s.pluginPool == nil {
+		return nil, fmt.Errorf("provider %q not found and plugin pool not configured", name)
+	}
+	officialReg := official.RegistryFromContext(s.ctx)
+	if officialReg == nil {
+		return nil, fmt.Errorf("provider %q not found and official registry not available", name)
+	}
+	op, found := officialReg.Get(name)
+	if !found {
+		return nil, fmt.Errorf("provider %q is not a known official provider", name)
+	}
+	dep := op.ToPluginDependency()
+	rel, err := s.pluginPool.EnsureAndAcquire(ctx, []solution.PluginDependency{dep})
+	if err != nil {
+		return nil, fmt.Errorf("loading plugin for provider %q: %w", name, err)
+	}
+	return rel, nil
+}
+
+// providerSource returns "official" if the provider is in the official
+// registry, otherwise "builtin".
+func (s *Server) providerSource(name string) string {
+	if officialReg := official.RegistryFromContext(s.ctx); officialReg != nil {
+		if _, found := officialReg.Get(name); found {
+			return "official"
+		}
+	}
+	return "builtin"
+}
 
 // registerProviderTools registers all provider-related MCP tools.
 func (s *Server) registerProviderTools() {
@@ -99,6 +138,11 @@ func (s *Server) registerProviderTools() {
 		),
 		mcp.WithBoolean("dry_run",
 			mcp.Description("Preview what would happen without executing. Defaults to false."),
+		),
+		mcp.WithString("expression",
+			mcp.Description("Optional CEL expression to filter/transform the provider output before returning. "+
+				"The result object is bound to '_' (e.g., '_.data', 'size(_.data)', '_.data.filter(x, x.status == \"open\")'). "+
+				"Use this to reduce large outputs to only the fields you need."),
 		),
 	)
 	s.addTool(runProviderTool, s.handleRunProvider)
@@ -190,7 +234,7 @@ func (s *Server) handleListProviders(_ context.Context, request mcp.CallToolRequ
 // input schema with required/optional annotations, output schemas, examples,
 // CLI usage, and capabilities. Uses the same structured format as
 // `scafctl get provider <name> -o json`.
-func (s *Server) handleGetProviderSchema(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGetProviderSchema(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	name, err := request.RequireString("name")
 	if err != nil {
 		return newStructuredError(ErrCodeInvalidInput, err.Error(),
@@ -201,6 +245,14 @@ func (s *Server) handleGetProviderSchema(_ context.Context, request mcp.CallTool
 	}
 
 	desc, err := inspect.LookupProvider(s.ctx, name, s.registry)
+	if err != nil {
+		// Try auto-resolving via the plugin pool before falling back
+		release, resolveErr := s.ensureProvider(ctx, name)
+		if resolveErr == nil {
+			defer release()
+			desc, err = inspect.LookupProvider(s.ctx, name, s.registry)
+		}
+	}
 	if err != nil {
 		// Check official provider registry before returning error
 		if officialReg := official.RegistryFromContext(s.ctx); officialReg != nil {
@@ -233,7 +285,7 @@ func (s *Server) handleGetProviderSchema(_ context.Context, request mcp.CallTool
 	// - CLI usage examples
 	// - version, capabilities, category, tags, links, maintainers
 	detail := provdetail.BuildProviderDetail(*desc)
-	detail["source"] = "builtin"
+	detail["source"] = s.providerSource(name)
 
 	return mcp.NewToolResultJSON(detail)
 }
@@ -241,7 +293,7 @@ func (s *Server) handleGetProviderSchema(_ context.Context, request mcp.CallTool
 // handleGetProviderOutputShape returns the output schema for a provider, optionally
 // filtered by capability. This makes it easy for agents to discover what fields
 // resolver results contain after execution.
-func (s *Server) handleGetProviderOutputShape(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGetProviderOutputShape(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	name, err := request.RequireString("name")
 	if err != nil {
 		return newStructuredError(ErrCodeInvalidInput, err.Error(),
@@ -253,6 +305,14 @@ func (s *Server) handleGetProviderOutputShape(_ context.Context, request mcp.Cal
 	capability := request.GetString("capability", "")
 
 	desc, err := inspect.LookupProvider(s.ctx, name, s.registry)
+	if err != nil {
+		// Try auto-resolving via the plugin pool
+		release, resolveErr := s.ensureProvider(ctx, name)
+		if resolveErr == nil {
+			defer release()
+			desc, err = inspect.LookupProvider(s.ctx, name, s.registry)
+		}
+	}
 	if err != nil {
 		availableNames := ""
 		if s.registry != nil {
@@ -287,6 +347,7 @@ func (s *Server) handleGetProviderOutputShape(_ context.Context, request mcp.Cal
 			for c := range desc.OutputSchemas {
 				availableCaps = append(availableCaps, string(c))
 			}
+			sort.Strings(availableCaps)
 			return newStructuredError(ErrCodeNotFound,
 				fmt.Sprintf("provider %q has no output schema for capability %q. Available: %v", name, capability, availableCaps),
 				WithField("capability"),
@@ -307,7 +368,7 @@ func (s *Server) handleGetProviderOutputShape(_ context.Context, request mcp.Cal
 }
 
 // handleRunProvider executes a provider directly and returns structured output.
-func (s *Server) handleRunProvider(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleRunProvider(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	name, err := request.RequireString("provider")
 	if err != nil {
 		return newStructuredError(ErrCodeInvalidInput, err.Error(),
@@ -340,6 +401,20 @@ func (s *Server) handleRunProvider(_ context.Context, request mcp.CallToolReques
 
 	prov, ok := s.registry.Get(name)
 	if !ok {
+		// Try auto-resolving via the plugin pool
+		release, resolveErr := s.ensureProvider(ctx, name)
+		if resolveErr != nil {
+			return newStructuredError(ErrCodeLoadFailed,
+				fmt.Sprintf("failed to load provider %q: %v", name, resolveErr),
+				WithField("provider"),
+				WithSuggestion("Check plugin pool configuration and provider availability"),
+				WithRelatedTools("list_providers"),
+			), nil
+		}
+		defer release()
+		prov, ok = s.registry.Get(name)
+	}
+	if !ok {
 		availableNames := ""
 		if names := s.registry.List(); len(names) > 0 {
 			availableNames = fmt.Sprintf(". Available providers: %v", names)
@@ -352,7 +427,7 @@ func (s *Server) handleRunProvider(_ context.Context, request mcp.CallToolReques
 		), nil
 	}
 
-	result, err := provider.RunProvider(s.ctx, provider.RunOptions{
+	result, err := provider.RunProvider(ctx, provider.RunOptions{
 		Provider:   prov,
 		Inputs:     inputs,
 		Capability: capability,
@@ -365,5 +440,41 @@ func (s *Server) handleRunProvider(_ context.Context, request mcp.CallToolReques
 		), nil
 	}
 
+	// Apply optional CEL expression to transform/filter the result.
+	expression := request.GetString("expression", "")
+	if expression != "" {
+		// Convert struct to map for CEL access.
+		resultMap, marshalErr := structToMap(result)
+		if marshalErr != nil {
+			return newStructuredError(ErrCodeExecFailed,
+				fmt.Sprintf("failed to prepare result for CEL evaluation: %v", marshalErr),
+			), nil
+		}
+		transformed, celErr := celexp.EvaluateExpression(ctx, expression, resultMap, nil)
+		if celErr != nil {
+			return newStructuredError(ErrCodeExecFailed,
+				fmt.Sprintf("CEL expression evaluation failed: %v", celErr),
+				WithField("expression"),
+				WithSuggestion("Use validate_expression to check CEL syntax first"),
+				WithRelatedTools("validate_expression", "list_cel_functions"),
+			), nil
+		}
+		return mcp.NewToolResultJSON(transformed)
+	}
+
 	return mcp.NewToolResultJSON(result)
+}
+
+// structToMap converts a Go struct to a map[string]any via JSON round-trip
+// so that CEL expressions can access fields by name.
+func structToMap(v any) (map[string]any, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, err
+	}
+	return m, nil
 }

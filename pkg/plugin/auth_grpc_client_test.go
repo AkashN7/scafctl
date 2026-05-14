@@ -15,6 +15,7 @@ import (
 
 	"github.com/oakwood-commons/scafctl-plugin-sdk/plugin/proto"
 	"github.com/oakwood-commons/scafctl/pkg/auth"
+	authofficial "github.com/oakwood-commons/scafctl/pkg/auth/official"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -44,6 +45,8 @@ type mockAuthHandlerServiceClient struct {
 	purgeExpiredTokensErr    error
 	stopAuthHandlerResp      *proto.StopAuthHandlerResponse
 	stopAuthHandlerErr       error
+	detectAvailableFlowsResp *proto.DetectAvailableFlowsResponse
+	detectAvailableFlowsErr  error
 }
 
 func (m *mockAuthHandlerServiceClient) GetAuthHandlers(_ context.Context, _ *proto.GetAuthHandlersRequest, _ ...grpc.CallOption) (*proto.GetAuthHandlersResponse, error) {
@@ -83,6 +86,10 @@ func (m *mockAuthHandlerServiceClient) PurgeExpiredTokens(_ context.Context, _ *
 
 func (m *mockAuthHandlerServiceClient) StopAuthHandler(_ context.Context, _ *proto.StopAuthHandlerRequest, _ ...grpc.CallOption) (*proto.StopAuthHandlerResponse, error) {
 	return m.stopAuthHandlerResp, m.stopAuthHandlerErr
+}
+
+func (m *mockAuthHandlerServiceClient) DetectAvailableFlows(_ context.Context, _ *proto.DetectAvailableFlowsRequest, _ ...grpc.CallOption) (*proto.DetectAvailableFlowsResponse, error) {
+	return m.detectAvailableFlowsResp, m.detectAvailableFlowsErr
 }
 
 // --- Mock login stream ---
@@ -635,6 +642,90 @@ func TestAuthHandlerGRPCClient_StopAuthHandler_OtherError(t *testing.T) {
 }
 
 // =====================================================================
+// AuthHandlerGRPCClient DetectAvailableFlows tests
+// =====================================================================
+
+func TestAuthHandlerGRPCClient_DetectAvailableFlows_Success(t *testing.T) {
+	t.Parallel()
+
+	mock := &mockAuthHandlerServiceClient{
+		detectAvailableFlowsResp: &proto.DetectAvailableFlowsResponse{
+			Flows: []*proto.FlowAvailability{
+				{Flow: "pat", Available: true, Reason: "GITHUB_TOKEN is set"},
+				{Flow: "device_code", Available: false, Reason: ""},
+			},
+		},
+	}
+	client := &AuthHandlerGRPCClient{client: mock}
+
+	flows, err := client.DetectAvailableFlows(context.Background(), "github")
+	require.NoError(t, err)
+	require.Len(t, flows, 2)
+
+	assert.Equal(t, auth.Flow("pat"), flows[0].Flow)
+	assert.True(t, flows[0].Available)
+	assert.Equal(t, "GITHUB_TOKEN is set", flows[0].Reason)
+
+	assert.Equal(t, auth.Flow("device_code"), flows[1].Flow)
+	assert.False(t, flows[1].Available)
+}
+
+func TestAuthHandlerGRPCClient_DetectAvailableFlows_ResponseError(t *testing.T) {
+	t.Parallel()
+
+	mock := &mockAuthHandlerServiceClient{
+		detectAvailableFlowsResp: &proto.DetectAvailableFlowsResponse{
+			Error: "detection failed: handler not configured",
+		},
+	}
+	client := &AuthHandlerGRPCClient{client: mock}
+
+	_, err := client.DetectAvailableFlows(context.Background(), "github")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "handler not configured")
+}
+
+func TestAuthHandlerGRPCClient_DetectAvailableFlows_Unimplemented(t *testing.T) {
+	t.Parallel()
+
+	mock := &mockAuthHandlerServiceClient{
+		detectAvailableFlowsErr: status.Error(codes.Unimplemented, "not supported"),
+	}
+	client := &AuthHandlerGRPCClient{client: mock}
+
+	flows, err := client.DetectAvailableFlows(context.Background(), "github")
+	require.NoError(t, err) // should degrade gracefully
+	assert.Empty(t, flows)  // empty result, no error
+	assert.NotNil(t, flows) // must be empty slice, not nil
+}
+
+func TestAuthHandlerGRPCClient_DetectAvailableFlows_OtherError(t *testing.T) {
+	t.Parallel()
+
+	mock := &mockAuthHandlerServiceClient{
+		detectAvailableFlowsErr: errors.New("transport error"),
+	}
+	client := &AuthHandlerGRPCClient{client: mock}
+
+	_, err := client.DetectAvailableFlows(context.Background(), "github")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "detect available flows RPC failed")
+}
+
+func TestAuthHandlerGRPCClient_DetectAvailableFlows_EmptyList(t *testing.T) {
+	t.Parallel()
+
+	mock := &mockAuthHandlerServiceClient{
+		detectAvailableFlowsResp: &proto.DetectAvailableFlowsResponse{},
+	}
+	client := &AuthHandlerGRPCClient{client: mock}
+
+	flows, err := client.DetectAvailableFlows(context.Background(), "github")
+	require.NoError(t, err)
+	assert.Empty(t, flows)
+}
+
+// =====================================================================
 // AuthHandlerGRPCServer tests for uncovered server methods
 // =====================================================================
 
@@ -730,6 +821,46 @@ func TestAuthHandlerGRPCServer_PurgeExpiredTokens_Error(t *testing.T) {
 
 	_, err := server.PurgeExpiredTokens(context.Background(), &proto.PurgeExpiredTokensRequest{HandlerName: "test"})
 	require.Error(t, err)
+}
+
+func TestAuthHandlerGRPCServer_DetectAvailableFlows_Success(t *testing.T) {
+	t.Parallel()
+
+	mock := &MockAuthHandlerPlugin{
+		detectFlowsFunc: func(_ context.Context, _ string) ([]FlowAvailability, error) {
+			return []FlowAvailability{
+				{Flow: "pat", Available: true, Reason: "GITHUB_TOKEN is set"},
+				{Flow: "device_code", Available: false},
+			}, nil
+		},
+	}
+	server := &AuthHandlerGRPCServer{Impl: mock}
+
+	resp, err := server.DetectAvailableFlows(context.Background(), &proto.DetectAvailableFlowsRequest{HandlerName: "github"})
+	require.NoError(t, err)
+	require.Empty(t, resp.Error)
+	require.Len(t, resp.Flows, 2)
+	assert.Equal(t, "pat", resp.Flows[0].Flow)
+	assert.True(t, resp.Flows[0].Available)
+	assert.Equal(t, "GITHUB_TOKEN is set", resp.Flows[0].Reason)
+	assert.Equal(t, "device_code", resp.Flows[1].Flow)
+	assert.False(t, resp.Flows[1].Available)
+}
+
+func TestAuthHandlerGRPCServer_DetectAvailableFlows_Error(t *testing.T) {
+	t.Parallel()
+
+	mock := &MockAuthHandlerPlugin{
+		detectFlowsFunc: func(_ context.Context, _ string) ([]FlowAvailability, error) {
+			return nil, fmt.Errorf("detection failed")
+		},
+	}
+	server := &AuthHandlerGRPCServer{Impl: mock}
+
+	resp, err := server.DetectAvailableFlows(context.Background(), &proto.DetectAvailableFlowsRequest{HandlerName: "github"})
+	require.NoError(t, err) // gRPC error is communicated via response, not gRPC error
+	assert.Equal(t, "detection failed", resp.Error)
+	assert.Empty(t, resp.Flows)
 }
 
 // =====================================================================
@@ -913,6 +1044,34 @@ func TestConfigureAndRegisterAuthHandlers_DuplicateSkipped(t *testing.T) {
 	assert.Equal(t, "Pre", h.DisplayName())
 }
 
+func TestConfigureAndRegisterAuthHandlers_DuplicateSkipsConfig(t *testing.T) {
+	t.Parallel()
+
+	mock := &MockAuthHandlerPlugin{}
+	ahClient := &AuthHandlerClient{
+		plugin: mock,
+		name:   "test-plugin",
+	}
+	registry := auth.NewRegistry()
+
+	// Pre-register a handler
+	preWrapper := NewAuthHandlerWrapper(ahClient, AuthHandlerInfo{Name: "handler-a", DisplayName: "Pre"})
+	require.NoError(t, registry.Register(preWrapper))
+
+	// Try to register duplicate with config containing settings (simulates secrets)
+	handlers := []AuthHandlerInfo{
+		{Name: "handler-a", DisplayName: "Dup"},
+	}
+	cfg := &ProviderConfig{
+		BinaryName: "mycli",
+		Settings:   map[string]json.RawMessage{"client_secret": json.RawMessage(`"super-secret"`)},
+	}
+	configureAndRegisterAuthHandlers(context.Background(), registry, ahClient, handlers, cfg)
+
+	// ConfigureAuthHandler must NOT have been called — no secrets leaked
+	assert.Nil(t, mock.lastConfig, "ConfigureAuthHandler should not be called for duplicate handler")
+}
+
 func TestConfigureAndRegisterAuthHandlers_ConfigureError(t *testing.T) {
 	t.Parallel()
 
@@ -935,6 +1094,94 @@ func TestConfigureAndRegisterAuthHandlers_ConfigureError(t *testing.T) {
 	h, err := registry.Get("handler-a")
 	require.NoError(t, err)
 	assert.Equal(t, "handler-a", h.Name())
+}
+
+// =====================================================================
+// buildTrustedDomains tests
+// =====================================================================
+
+func TestBuildTrustedDomains_NilRegistry(t *testing.T) {
+	t.Parallel()
+
+	domains := buildTrustedDomains("github", nil, nil)
+	assert.Empty(t, domains)
+}
+
+func TestBuildTrustedDomains_OfficialOnly(t *testing.T) {
+	t.Parallel()
+
+	reg := authofficial.NewRegistryFrom([]authofficial.AuthHandler{
+		{Name: "github", CatalogRef: "github", TrustedVerificationDomains: []string{"github.com"}},
+	})
+
+	domains := buildTrustedDomains("github", reg, nil)
+	assert.Equal(t, []string{"github.com"}, domains)
+}
+
+func TestBuildTrustedDomains_ConfigOnly(t *testing.T) {
+	t.Parallel()
+
+	domains := buildTrustedDomains("github", nil, []string{"ghes.corp.example.com"})
+	assert.Equal(t, []string{"ghes.corp.example.com"}, domains)
+}
+
+func TestBuildTrustedDomains_Merged(t *testing.T) {
+	t.Parallel()
+
+	reg := authofficial.NewRegistryFrom([]authofficial.AuthHandler{
+		{Name: "entra", CatalogRef: "entra", TrustedVerificationDomains: []string{
+			"login.microsoftonline.com", "login.microsoft.com",
+		}},
+	})
+	cfgDomains := []string{"my-idp.corp.example.com"}
+
+	domains := buildTrustedDomains("entra", reg, cfgDomains)
+	assert.Equal(t, []string{"login.microsoftonline.com", "login.microsoft.com", "my-idp.corp.example.com"}, domains)
+}
+
+func TestBuildTrustedDomains_UnknownHandler(t *testing.T) {
+	t.Parallel()
+
+	reg := authofficial.NewRegistryFrom([]authofficial.AuthHandler{
+		{Name: "github", CatalogRef: "github", TrustedVerificationDomains: []string{"github.com"}},
+	})
+	cfgDomains := []string{"custom.example.com"}
+
+	// Handler not in registry — only config domains returned.
+	domains := buildTrustedDomains("unknown-handler", reg, cfgDomains)
+	assert.Equal(t, []string{"custom.example.com"}, domains)
+}
+
+func TestConfigureAndRegisterAuthHandlers_SetsTrustedDomains(t *testing.T) {
+	t.Parallel()
+
+	// Put official registry in context.
+	reg := authofficial.NewRegistryFrom([]authofficial.AuthHandler{
+		{Name: "github", CatalogRef: "github", TrustedVerificationDomains: []string{"github.com"}},
+	})
+	ctx := authofficial.WithRegistry(context.Background(), reg)
+
+	registry := auth.NewRegistry()
+	ahClient := &AuthHandlerClient{
+		plugin: &MockAuthHandlerPlugin{},
+		name:   "test-plugin",
+	}
+
+	handlers := []AuthHandlerInfo{
+		{Name: "github", DisplayName: "GitHub"},
+	}
+
+	configureAndRegisterAuthHandlers(ctx, registry, ahClient, handlers, nil)
+
+	h, err := registry.Get("github")
+	require.NoError(t, err)
+
+	// Verify trusted domains were set.
+	wrapper, ok := h.(*AuthHandlerWrapper)
+	require.True(t, ok)
+	wrapper.mu.RLock()
+	defer wrapper.mu.RUnlock()
+	assert.Equal(t, []string{"github.com"}, wrapper.trustedDomains)
 }
 
 // =====================================================================
@@ -1050,6 +1297,51 @@ func TestAuthHandlerWrapper_InjectAuth_EmptyTokenType(t *testing.T) {
 	assert.Equal(t, "Bearer my-token", req.Header.Get("Authorization"))
 }
 
+func TestAuthHandlerWrapper_DetectAvailableFlows_Success(t *testing.T) {
+	t.Parallel()
+
+	mock := &MockAuthHandlerPlugin{
+		detectFlowsFunc: func(_ context.Context, _ string) ([]FlowAvailability, error) {
+			return []FlowAvailability{
+				{Flow: "pat", Available: true, Reason: "GITHUB_TOKEN is set"},
+			}, nil
+		},
+	}
+	w := &AuthHandlerWrapper{
+		client:      &AuthHandlerClient{plugin: mock, name: "p"},
+		handlerName: "github",
+		info:        AuthHandlerInfo{Name: "github"},
+	}
+
+	flows, err := w.DetectAvailableFlows(context.Background())
+	require.NoError(t, err)
+	require.Len(t, flows, 1)
+	assert.Equal(t, auth.Flow("pat"), flows[0].Flow)
+	assert.True(t, flows[0].Available)
+}
+
+func TestAuthHandlerWrapper_DetectAvailableFlows_Empty(t *testing.T) {
+	t.Parallel()
+
+	mock := &MockAuthHandlerPlugin{} // default returns nil, nil
+	w := &AuthHandlerWrapper{
+		client:      &AuthHandlerClient{plugin: mock, name: "p"},
+		handlerName: "h",
+		info:        AuthHandlerInfo{Name: "h"},
+	}
+
+	flows, err := w.DetectAvailableFlows(context.Background())
+	require.NoError(t, err)
+	assert.Nil(t, flows)
+}
+
+func TestAuthHandlerWrapper_ImplementsFlowDetector(t *testing.T) {
+	t.Parallel()
+
+	w := &AuthHandlerWrapper{}
+	var _ auth.FlowDetector = w // compile-time check
+}
+
 // =====================================================================
 // errAuthPlugin helper for error-path server tests
 // =====================================================================
@@ -1092,4 +1384,8 @@ func (e *errAuthPlugin) ConfigureAuthHandler(_ context.Context, _ string, _ Prov
 
 func (e *errAuthPlugin) StopAuthHandler(_ context.Context, _ string) error {
 	return e.err
+}
+
+func (e *errAuthPlugin) DetectAvailableFlows(_ context.Context, _ string) ([]FlowAvailability, error) {
+	return nil, e.err
 }

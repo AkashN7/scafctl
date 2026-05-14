@@ -11,16 +11,22 @@ import (
 	"github.com/MakeNowJust/heredoc/v2"
 	authpkg "github.com/oakwood-commons/scafctl/pkg/auth"
 	"github.com/oakwood-commons/scafctl/pkg/auth/diagnose"
+	authofficial "github.com/oakwood-commons/scafctl/pkg/auth/official"
 	"github.com/oakwood-commons/scafctl/pkg/cmd/flags"
 	"github.com/oakwood-commons/scafctl/pkg/config"
 	"github.com/oakwood-commons/scafctl/pkg/exitcode"
 	"github.com/oakwood-commons/scafctl/pkg/paths"
+	"github.com/oakwood-commons/scafctl/pkg/plugin"
 	"github.com/oakwood-commons/scafctl/pkg/settings"
 	"github.com/oakwood-commons/scafctl/pkg/terminal"
 	"github.com/oakwood-commons/scafctl/pkg/terminal/kvx"
 	"github.com/oakwood-commons/scafctl/pkg/terminal/writer"
 	"github.com/spf13/cobra"
 )
+
+// pluginStartupWarnThreshold is the latency above which a plugin handler
+// startup is flagged as slow during 'auth diagnose'.
+const pluginStartupWarnThreshold = 2 * time.Second
 
 // clockSkewCheckFunc is the function used to perform the clock skew check.
 // Tests can replace this to avoid real network calls.
@@ -114,6 +120,57 @@ func CommandDiagnose(cliParams *settings.Run, ioStreams *terminal.IOStreams, _ s
 					Status:   diagnose.StatusOK,
 					Message:  fmt.Sprintf("registered handlers: %v", handlerNames),
 				})
+			}
+
+			// ── 1.5. Handler source ──────────────────────────────────────────
+			officialReg := authofficial.RegistryFromContext(ctx)
+			authReg := authpkg.RegistryFromContext(ctx)
+			if officialReg != nil {
+				for _, name := range officialReg.Names() {
+					source := handlerSource(authReg, name)
+					status := diagnose.StatusOK
+					if source == "not found" {
+						status = diagnose.StatusWarn
+					}
+					addCheck(diagnose.Check{
+						Category: "source",
+						Name:     fmt.Sprintf("%s: handler source", name),
+						Status:   status,
+						Message:  fmt.Sprintf("Handler source: %s", source),
+					})
+				}
+			}
+
+			// ── 1.6. Plugin startup latency ──────────────────────────────────
+			if authReg != nil {
+				for _, name := range handlerNames {
+					h, hErr := authReg.Get(name)
+					if hErr != nil {
+						continue
+					}
+					if pw, ok := h.(*plugin.AuthHandlerWrapper); ok {
+						latency := pw.StartupLatency()
+						status := diagnose.StatusOK
+						msg := fmt.Sprintf("Handler startup: %s (plugin)", latency.Round(time.Millisecond))
+						if latency > pluginStartupWarnThreshold {
+							status = diagnose.StatusWarn
+							msg += " -- slow startup"
+						}
+						addCheck(diagnose.Check{
+							Category: "startup",
+							Name:     fmt.Sprintf("%s: startup latency", name),
+							Status:   status,
+							Message:  msg,
+						})
+					} else {
+						addCheck(diagnose.Check{
+							Category: "startup",
+							Name:     fmt.Sprintf("%s: startup latency", name),
+							Status:   diagnose.StatusOK,
+							Message:  "Handler startup: n/a (built-in, not measured)",
+						})
+					}
+				}
 			}
 
 			// ── 2. Config file ────────────────────────────────────────────────
@@ -361,4 +418,22 @@ func CommandDiagnose(cliParams *settings.Run, ioStreams *terminal.IOStreams, _ s
 	cmd.Flags().BoolVar(&liveToken, "live-token", false, "Attempt a live token fetch for each authenticated handler to confirm end-to-end health")
 
 	return cmd
+}
+
+// handlerSource determines the source of an auth handler:
+//   - "built-in" if the handler is registered but not a plugin wrapper
+//   - "plugin" if the handler is a plugin wrapper
+//   - "not found" if the handler is not registered
+func handlerSource(authReg *authpkg.Registry, name string) string {
+	if authReg == nil || !authReg.Has(name) {
+		return "not found"
+	}
+	handler, err := authReg.Get(name)
+	if err != nil {
+		return "not found"
+	}
+	if _, ok := handler.(*plugin.AuthHandlerWrapper); ok {
+		return "plugin"
+	}
+	return "built-in"
 }

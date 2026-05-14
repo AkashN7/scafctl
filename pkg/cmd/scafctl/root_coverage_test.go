@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	authofficial "github.com/oakwood-commons/scafctl/pkg/auth/official"
+	"github.com/oakwood-commons/scafctl/pkg/plugin"
 	"github.com/oakwood-commons/scafctl/pkg/settings"
 	"github.com/oakwood-commons/scafctl/pkg/terminal"
 	"github.com/spf13/cobra"
@@ -406,4 +408,235 @@ func TestRoot_BinaryName_Empty(t *testing.T) {
 	t.Parallel()
 	cmd := Root(&RootOptions{BinaryName: ""})
 	assert.Equal(t, "scafctl", cmd.Use)
+}
+
+// TestRoot_OfficialAuthHandlerRegistry_Enabled verifies that the official auth
+// handler registry is wired into the context when not disabled.
+func TestRoot_OfficialAuthHandlerRegistry_Enabled(t *testing.T) {
+	t.Parallel()
+
+	var registryFromCtx *authofficial.Registry
+	ioStreams, _, _ := terminal.NewTestIOStreams()
+	cmd := Root(&RootOptions{
+		IOStreams: ioStreams,
+		PreRunHook: func(cmd *cobra.Command, _ []string) error {
+			registryFromCtx = authofficial.RegistryFromContext(cmd.Context())
+			return nil
+		},
+	})
+	cmd.SetArgs([]string{"version"})
+
+	err := cmd.Execute()
+	require.NoError(t, err)
+	require.NotNil(t, registryFromCtx, "official auth handler registry should be set in context")
+	assert.Equal(t, 3, registryFromCtx.Len(), "default registry should contain 3 handlers")
+}
+
+// TestRoot_OfficialAuthHandlerRegistry_CustomEmbedder verifies that an
+// embedder-supplied registry is used instead of the default.
+func TestRoot_OfficialAuthHandlerRegistry_CustomEmbedder(t *testing.T) {
+	t.Parallel()
+
+	customRegistry := authofficial.NewRegistryFrom([]authofficial.AuthHandler{
+		{Name: "custom-handler", CatalogRef: "custom", DefaultVersion: "latest", MinSDKVersion: "0.1.0"},
+	})
+
+	var registryFromCtx *authofficial.Registry
+	ioStreams, _, _ := terminal.NewTestIOStreams()
+	cmd := Root(&RootOptions{
+		IOStreams:            ioStreams,
+		OfficialAuthHandlers: customRegistry,
+		PreRunHook: func(cmd *cobra.Command, _ []string) error {
+			registryFromCtx = authofficial.RegistryFromContext(cmd.Context())
+			return nil
+		},
+	})
+	cmd.SetArgs([]string{"version"})
+
+	err := cmd.Execute()
+	require.NoError(t, err)
+	require.NotNil(t, registryFromCtx, "embedder registry should be set in context")
+	assert.Equal(t, 1, registryFromCtx.Len(), "embedder registry should contain 1 handler")
+	_, found := registryFromCtx.Get("custom-handler")
+	assert.True(t, found, "embedder registry should contain the custom handler")
+}
+
+// TestRoot_OfficialAuthHandlerRegistry_Disabled verifies that the official auth
+// handler registry is nil in context when disabled via config.
+func TestRoot_OfficialAuthHandlerRegistry_Disabled(t *testing.T) {
+	t.Parallel()
+
+	disabledCfg := []byte("settings:\n  disableOfficialAuthHandlers: true\n")
+
+	var registryFromCtx *authofficial.Registry
+	hookCalled := false
+	ioStreams, _, _ := terminal.NewTestIOStreams()
+	cmd := Root(&RootOptions{
+		IOStreams:      ioStreams,
+		ConfigDefaults: disabledCfg,
+		PreRunHook: func(cmd *cobra.Command, _ []string) error {
+			registryFromCtx = authofficial.RegistryFromContext(cmd.Context())
+			hookCalled = true
+			return nil
+		},
+	})
+	cmd.SetArgs([]string{"version"})
+
+	err := cmd.Execute()
+	require.NoError(t, err)
+	assert.True(t, hookCalled, "PreRunHook should have been called")
+	assert.Nil(t, registryFromCtx, "official auth handler registry should be nil when disabled")
+}
+
+// TestRoot_OfficialAuthHandlerRegistry_Enabled_NonDefaultBinary verifies that the
+// registry is wired correctly when using a custom BinaryName (embedder scenario).
+func TestRoot_OfficialAuthHandlerRegistry_Enabled_NonDefaultBinary(t *testing.T) {
+	t.Parallel()
+
+	var registryFromCtx *authofficial.Registry
+	ioStreams, _, _ := terminal.NewTestIOStreams()
+	cmd := Root(&RootOptions{
+		IOStreams:  ioStreams,
+		BinaryName: "mycli",
+		PreRunHook: func(cmd *cobra.Command, _ []string) error {
+			registryFromCtx = authofficial.RegistryFromContext(cmd.Context())
+			return nil
+		},
+	})
+	cmd.SetArgs([]string{"version"})
+
+	err := cmd.Execute()
+	require.NoError(t, err)
+	require.NotNil(t, registryFromCtx, "official auth handler registry should be set for custom binary")
+	assert.Equal(t, 3, registryFromCtx.Len())
+}
+
+// TestRoot_PluginSignaturePolicy_Wired verifies that PluginSignaturePolicy is
+// stored in context so downstream code can retrieve it.
+func TestRoot_PluginSignaturePolicy_Wired(t *testing.T) {
+	t.Parallel()
+	ioStreams, _, _ := terminal.NewTestIOStreams()
+
+	policy := &plugin.SignaturePolicy{
+		Mode:              plugin.SignatureModeEnforce,
+		TrustedIssuers:    []string{"https://token.actions.githubusercontent.com"},
+		TrustedIdentities: []string{"https://github.com/oakwood-commons/*"},
+	}
+
+	var captured *plugin.SignaturePolicy
+	probe := &cobra.Command{
+		Use: "probe",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			captured = plugin.SignaturePolicyFromContext(cmd.Context())
+			return nil
+		},
+	}
+
+	cmd := Root(&RootOptions{
+		IOStreams:             ioStreams,
+		PluginSignaturePolicy: policy,
+	})
+	cmd.AddCommand(probe)
+	cmd.SetArgs([]string{"probe"})
+
+	err := cmd.Execute()
+	require.NoError(t, err)
+	require.NotNil(t, captured, "SignaturePolicy should be available in context")
+	assert.Equal(t, plugin.SignatureModeEnforce, captured.Mode)
+	assert.Equal(t, policy.TrustedIssuers, captured.TrustedIssuers)
+	assert.Equal(t, policy.TrustedIdentities, captured.TrustedIdentities)
+}
+
+// TestRoot_PluginSignaturePolicy_NilByDefault verifies context has no
+// SignaturePolicy when none is configured.
+func TestRoot_PluginSignaturePolicy_NilByDefault(t *testing.T) {
+	t.Parallel()
+	ioStreams, _, _ := terminal.NewTestIOStreams()
+
+	var captured *plugin.SignaturePolicy
+	probe := &cobra.Command{
+		Use: "probe",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			captured = plugin.SignaturePolicyFromContext(cmd.Context())
+			return nil
+		},
+	}
+
+	cmd := Root(&RootOptions{IOStreams: ioStreams})
+	cmd.AddCommand(probe)
+	cmd.SetArgs([]string{"probe"})
+
+	err := cmd.Execute()
+	require.NoError(t, err)
+	assert.Nil(t, captured, "SignaturePolicy should be nil when not configured")
+}
+
+// TestRoot_NoBuiltInHandlerWarnings verifies that no deprecation warnings
+// appear after built-in auth handlers have been removed (Stage B).
+func TestRoot_NoBuiltInHandlerWarnings(t *testing.T) {
+	t.Parallel()
+
+	ioStreams, out, errOut := terminal.NewTestIOStreams()
+	cmd := Root(&RootOptions{IOStreams: ioStreams})
+	cmd.SetArgs([]string{"version"})
+
+	err := cmd.Execute()
+	require.NoError(t, err)
+
+	assert.NotContains(t, out.String(), "Auth handler", "no deprecation warnings should appear on stdout after handler extraction")
+	assert.NotContains(t, errOut.String(), "Auth handler", "no deprecation warnings should appear on stderr after handler extraction")
+}
+
+func TestCommandNeedsAuthHandlers(t *testing.T) {
+	t.Parallel()
+
+	root := &cobra.Command{Use: "scafctl"}
+	authCmd := &cobra.Command{Use: "auth"}
+	loginCmd := &cobra.Command{Use: "login"}
+	authCmd.AddCommand(loginCmd)
+	serveCmd := &cobra.Command{Use: "serve"}
+	mcpCmd := &cobra.Command{Use: "mcp"}
+	mcpServeCmd := &cobra.Command{Use: "serve"}
+	mcpCmd.AddCommand(mcpServeCmd)
+	catalogCmd := &cobra.Command{Use: "catalog"}
+	catalogLoginCmd := &cobra.Command{Use: "login"}
+	catalogCmd.AddCommand(catalogLoginCmd)
+	getCmd := &cobra.Command{Use: "get"}
+	authhandlerCmd := &cobra.Command{Use: "authhandler"}
+	getCmd.AddCommand(authhandlerCmd)
+	cacheCmd := &cobra.Command{Use: "cache"}
+	clearCmd := &cobra.Command{Use: "clear"}
+	cacheCmd.AddCommand(clearCmd)
+	versionCmd := &cobra.Command{Use: "version"}
+	pluginsCmd := &cobra.Command{Use: "plugins"}
+	listCmd := &cobra.Command{Use: "list"}
+	pluginsCmd.AddCommand(listCmd)
+	root.AddCommand(authCmd, serveCmd, mcpCmd, catalogCmd, getCmd, cacheCmd, versionCmd, pluginsCmd)
+
+	tests := []struct {
+		name string
+		cmd  *cobra.Command
+		want bool
+	}{
+		{"auth login", loginCmd, true},
+		{"auth", authCmd, true},
+		{"serve", serveCmd, true},
+		{"mcp serve", mcpServeCmd, true},
+		{"mcp", mcpCmd, true},
+		{"catalog", catalogCmd, true},
+		{"catalog login", catalogLoginCmd, true},
+		{"get authhandler", authhandlerCmd, true},
+		{"get", getCmd, false},
+		{"cache clear", clearCmd, false},
+		{"version", versionCmd, false},
+		{"plugins list", listCmd, false},
+		{"root", root, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, commandNeedsAuthHandlers(tc.cmd))
+		})
+	}
 }

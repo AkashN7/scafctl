@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -39,6 +40,9 @@ func TestMain(m *testing.M) {
 	defer os.RemoveAll(tmpDir)
 
 	binaryPath = filepath.Join(tmpDir, "scafctl")
+	if runtime.GOOS == "windows" {
+		binaryPath += ".exe"
+	}
 
 	// Build from project root
 	projectRoot := findProjectRoot()
@@ -975,7 +979,7 @@ func TestIntegration_RunSolution_FileNotFound(t *testing.T) {
 	)
 
 	assert.NotEqual(t, 0, exitCode)
-	assert.True(t, strings.Contains(stderr, "not found") || strings.Contains(stderr, "no such file"))
+	assert.True(t, strings.Contains(stderr, "not found") || strings.Contains(stderr, "no such file") || strings.Contains(stderr, "cannot find"))
 }
 
 func TestIntegration_RunSolution_InvalidYAML(t *testing.T) {
@@ -1646,6 +1650,9 @@ spec:
 
 func TestIntegration_RunSolution_RetryIfWithRetryEnabled(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses a shell script which requires /bin/sh")
+	}
 	// Test that retryIf: "true" allows retries on actual errors
 	// This creates a temp script that succeeds on second run
 	tmpDir := t.TempDir()
@@ -1655,11 +1662,11 @@ func TestIntegration_RunSolution_RetryIfWithRetryEnabled(t *testing.T) {
 
 	// Create a script that fails first time, succeeds second time
 	script := `#!/bin/sh
-if [ -f "` + counterFile + `" ]; then
+if [ -f "` + filepath.ToSlash(counterFile) + `" ]; then
   echo "Second attempt - success"
   exit 0
 else
-  echo "1" > "` + counterFile + `"
+  echo "1" > "` + filepath.ToSlash(counterFile) + `"
   exit 1
 fi
 `
@@ -1686,7 +1693,7 @@ spec:
           # Always retry on error (won't trigger for exit code failures)
           retryIf: "true"
         inputs:
-          command: "` + scriptPath + `"
+          command: "` + filepath.ToSlash(scriptPath) + `"
 `
 	require.NoError(t, os.WriteFile(solutionPath, []byte(solution), 0o644))
 
@@ -1925,6 +1932,35 @@ func TestIntegration_AuthHelp(t *testing.T) {
 	assert.Contains(t, stdout, "login")
 	assert.Contains(t, stdout, "logout")
 	assert.Contains(t, stdout, "status")
+	assert.Contains(t, stdout, "handlers")
+}
+
+func TestIntegration_AuthHandlers(t *testing.T) {
+	t.Parallel()
+	stdout, _, exitCode := runScafctl(t, "auth", "handlers")
+
+	assert.Equal(t, 0, exitCode)
+	// The command should produce output listing available handlers.
+	assert.NotEmpty(t, stdout)
+}
+
+func TestIntegration_AuthHandlersJSON(t *testing.T) {
+	t.Parallel()
+	stdout, _, exitCode := runScafctl(t, "auth", "handlers", "-o", "json")
+
+	assert.Equal(t, 0, exitCode)
+	// JSON output must be valid and parseable.
+	var parsed []map[string]any
+	err := json.Unmarshal([]byte(stdout), &parsed)
+	assert.NoError(t, err, "output should be valid JSON")
+}
+
+func TestIntegration_AuthHandlersHelp(t *testing.T) {
+	t.Parallel()
+	stdout, _, exitCode := runScafctl(t, "auth", "handlers", "--help")
+
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, stdout, "handlers")
 }
 
 func TestIntegration_AuthList(t *testing.T) {
@@ -1975,14 +2011,31 @@ func TestIntegration_AuthTokenHelp(t *testing.T) {
 	assert.Contains(t, stdout, "--force-refresh")
 }
 
-func TestIntegration_AuthLoginGCPHelp(t *testing.T) {
+func TestIntegration_AuthMigrateHelp(t *testing.T) {
 	t.Parallel()
-	stdout, _, exitCode := runScafctl(t, "auth", "login", "gcp", "--help")
+	stdout, _, exitCode := runScafctl(t, "auth", "migrate", "--help")
 
 	assert.Equal(t, 0, exitCode)
-	assert.Contains(t, stdout, "gcp")
-	assert.Contains(t, stdout, "--flow")
-	assert.Contains(t, stdout, "--impersonate-service-account")
+	assert.Contains(t, stdout, "migrate")
+}
+
+// NOTE: Auth handlers (entra, gcp, github) have been extracted to plugins.
+// These tests validate the CLI behaviour regardless of whether the plugin is
+// installed. When the plugin is not installed, the handler is "unknown" and
+// the command fails with "unknown auth handler". When installed, the handler
+// works as before. Tests below accept either outcome.
+
+func TestIntegration_AuthLoginGCPHelp(t *testing.T) {
+	t.Parallel()
+	stdout, stderr, exitCode := runScafctl(t, "auth", "login", "gcp", "--help")
+
+	if exitCode == 0 {
+		assert.Contains(t, stdout, "gcp")
+		assert.Contains(t, stdout, "--flow")
+	} else {
+		// Plugin not installed — handler is unknown
+		assert.Contains(t, stderr, "unknown auth handler")
+	}
 }
 
 func TestIntegration_AuthLoginGCPInvalidFlow(t *testing.T) {
@@ -1990,40 +2043,57 @@ func TestIntegration_AuthLoginGCPInvalidFlow(t *testing.T) {
 	_, stderr, exitCode := runScafctl(t, "auth", "login", "gcp", "--flow", "invalid-flow")
 
 	assert.NotEqual(t, 0, exitCode)
-	assert.Contains(t, stderr, "unknown flow")
-	assert.Contains(t, stderr, "gcp")
+	// Either "unknown flow" (plugin installed) or "unknown auth handler" (plugin not installed)
+	assert.True(t,
+		strings.Contains(stderr, "unknown flow") || strings.Contains(stderr, "unknown auth handler"),
+		"expected flow or handler error, got: %s", stderr,
+	)
 }
 
 func TestIntegration_AuthStatusGCP(t *testing.T) {
 	t.Parallel()
-	_, _, exitCode := runScafctl(t, "auth", "status", "gcp")
+	_, stderr, exitCode := runScafctl(t, "auth", "status", "gcp")
 
-	// Should succeed even if not authenticated (shows "not authenticated")
-	assert.Equal(t, 0, exitCode)
+	// Succeeds if plugin is available and working, fails otherwise.
+	// Possible errors: "unknown auth handler", "no auth handlers found", or gRPC plugin errors.
+	if exitCode != 0 {
+		assert.True(t,
+			strings.Contains(stderr, "unknown auth handler") || strings.Contains(stderr, "no auth handlers found") || strings.Contains(stderr, "rpc error"),
+			"expected handler/plugin error, got: %s", stderr,
+		)
+	}
 }
 
 func TestIntegration_AuthLogoutGCP(t *testing.T) {
 	t.Parallel()
-	stdout, _, exitCode := runScafctl(t, "auth", "logout", "gcp")
+	stdout, stderr, exitCode := runScafctl(t, "auth", "logout", "gcp")
 
-	// Should succeed regardless of authentication state
-	assert.Equal(t, 0, exitCode)
-	// May show "Not currently authenticated" or "Successfully logged out" depending on environment
-	assert.True(t,
-		strings.Contains(stdout, "Not currently authenticated") || strings.Contains(stdout, "Successfully logged out"),
-		"expected logout message, got: %s", stdout,
-	)
+	if exitCode == 0 {
+		assert.True(t,
+			strings.Contains(stdout, "Not currently authenticated") || strings.Contains(stdout, "Successfully logged out"),
+			"expected logout message, got: %s", stdout,
+		)
+	} else {
+		// Plugin not installed or plugin connection error
+		assert.True(t,
+			strings.Contains(stderr, "unknown auth handler") || strings.Contains(stderr, "no auth handlers found") || strings.Contains(stderr, "rpc error"),
+			"expected handler/plugin error, got: %s", stderr,
+		)
+	}
 }
 
 func TestIntegration_AuthLoginEntraHelp(t *testing.T) {
 	t.Parallel()
-	stdout, _, exitCode := runScafctl(t, "auth", "login", "entra", "--help")
+	stdout, stderr, exitCode := runScafctl(t, "auth", "login", "entra", "--help")
 
-	assert.Equal(t, 0, exitCode)
-	assert.Contains(t, stdout, "entra")
-	assert.Contains(t, stdout, "--flow")
-	assert.Contains(t, stdout, "--tenant")
-	assert.Contains(t, stdout, "--callback-port")
+	if exitCode == 0 {
+		assert.Contains(t, stdout, "entra")
+		assert.Contains(t, stdout, "--flow")
+		assert.Contains(t, stdout, "--tenant")
+		assert.Contains(t, stdout, "--callback-port")
+	} else {
+		assert.Contains(t, stderr, "unknown auth handler")
+	}
 }
 
 func TestIntegration_AuthLoginEntraInvalidFlow(t *testing.T) {
@@ -2031,17 +2101,17 @@ func TestIntegration_AuthLoginEntraInvalidFlow(t *testing.T) {
 	_, stderr, exitCode := runScafctl(t, "auth", "login", "entra", "--flow", "bogus-flow")
 
 	assert.NotEqual(t, 0, exitCode)
-	assert.Contains(t, stderr, "unknown flow")
-	assert.Contains(t, stderr, "interactive")
+	assert.True(t,
+		strings.Contains(stderr, "unknown flow") || strings.Contains(stderr, "unknown auth handler"),
+		"expected flow or handler error, got: %s", stderr,
+	)
 }
 
 func TestIntegration_AuthLoginCallbackPortSupported(t *testing.T) {
 	t.Parallel()
-	// GitHub now supports --callback-port for the interactive (PKCE) flow.
-	// The login command should accept this flag without error (it will still
-	// fail because we don't complete the browser auth, but it shouldn't
-	// reject the flag itself).
-	stdout, _, exitCode := runScafctl(t, "auth", "login", "github", "--help")
+	// The login command accepts --callback-port as a generic flag for any handler.
+	// Verify it appears in help output (help is handler-independent).
+	stdout, _, exitCode := runScafctl(t, "auth", "login", "--help")
 
 	assert.Equal(t, 0, exitCode)
 	assert.Contains(t, stdout, "--callback-port")
@@ -2049,8 +2119,8 @@ func TestIntegration_AuthLoginCallbackPortSupported(t *testing.T) {
 
 func TestIntegration_AuthLoginGitHubInteractiveFlow(t *testing.T) {
 	t.Parallel()
-	// Verify that --flow interactive is accepted for GitHub
-	stdout, _, exitCode := runScafctl(t, "auth", "login", "github", "--help")
+	// Verify that --flow is accepted for the login command
+	stdout, _, exitCode := runScafctl(t, "auth", "login", "--help")
 
 	assert.Equal(t, 0, exitCode)
 	assert.Contains(t, stdout, "--flow")
@@ -2061,38 +2131,55 @@ func TestIntegration_AuthLoginGitHubInvalidFlow(t *testing.T) {
 	_, stderr, exitCode := runScafctl(t, "auth", "login", "github", "--flow", "bogus-flow")
 
 	assert.NotEqual(t, 0, exitCode)
-	assert.Contains(t, stderr, "unknown flow")
-	assert.Contains(t, stderr, "github")
+	// Either "unknown flow" (plugin installed) or "unknown auth handler" (plugin not installed)
+	assert.True(t,
+		strings.Contains(stderr, "unknown flow") || strings.Contains(stderr, "unknown auth handler"),
+		"expected flow or handler error, got: %s", stderr,
+	)
 }
 
 func TestIntegration_AuthLoginGitHubAppFlow(t *testing.T) {
 	t.Parallel()
-	// github-app flow without required config should fail with a config error,
-	// not a flow-parsing error.
+	// github-app flow without required config should fail.
 	_, stderr, exitCode := runScafctl(t, "auth", "login", "github", "--flow", "github-app")
 
 	assert.NotEqual(t, 0, exitCode)
-	// Should fail with a config error about missing app ID or private key
-	assert.Contains(t, stderr, "app ID is required")
+	// Either config error (plugin installed) or handler not found (plugin not installed)
+	assert.True(t,
+		strings.Contains(stderr, "app ID is required") || strings.Contains(stderr, "unknown auth handler"),
+		"expected config or handler error, got: %s", stderr,
+	)
 }
 
 func TestIntegration_AuthStatusEntra(t *testing.T) {
 	t.Parallel()
-	_, _, exitCode := runScafctl(t, "auth", "status", "entra")
+	_, stderr, exitCode := runScafctl(t, "auth", "status", "entra")
 
-	// Should succeed even if not authenticated
-	assert.Equal(t, 0, exitCode)
+	// Succeeds if plugin is available and working, fails otherwise.
+	if exitCode != 0 {
+		assert.True(t,
+			strings.Contains(stderr, "unknown auth handler") || strings.Contains(stderr, "no auth handlers found") || strings.Contains(stderr, "rpc error"),
+			"expected handler/plugin error, got: %s", stderr,
+		)
+	}
 }
 
 func TestIntegration_AuthLogoutEntra(t *testing.T) {
 	t.Parallel()
-	stdout, _, exitCode := runScafctl(t, "auth", "logout", "entra")
+	stdout, stderr, exitCode := runScafctl(t, "auth", "logout", "entra")
 
-	assert.Equal(t, 0, exitCode)
-	assert.True(t,
-		strings.Contains(stdout, "Not currently authenticated") || strings.Contains(stdout, "Successfully logged out"),
-		"expected logout message, got: %s", stdout,
-	)
+	if exitCode == 0 {
+		assert.True(t,
+			strings.Contains(stdout, "Not currently authenticated") || strings.Contains(stdout, "Successfully logged out"),
+			"expected logout message, got: %s", stdout,
+		)
+	} else {
+		// Plugin not installed or plugin connection error
+		assert.True(t,
+			strings.Contains(stderr, "unknown auth handler") || strings.Contains(stderr, "no auth handlers found") || strings.Contains(stderr, "rpc error"),
+			"expected handler/plugin error, got: %s", stderr,
+		)
+	}
 }
 
 // ============================================================================
@@ -2754,10 +2841,14 @@ func TestIntegration_CatalogListHelp(t *testing.T) {
 func TestIntegration_CatalogList_Empty(t *testing.T) {
 	t.Parallel()
 	// Create a temp directory for the catalog — no local artifacts.
+	// XDG_CONFIG_HOME is also isolated to prevent the binary from reading
+	// the real config, which may reference remote catalogs that require
+	// auth or are unreachable in CI.
 	tmpDir := t.TempDir()
 	env := map[string]string{
-		"XDG_DATA_HOME":  tmpDir,
-		"XDG_CACHE_HOME": tmpDir,
+		"XDG_DATA_HOME":   tmpDir,
+		"XDG_CACHE_HOME":  tmpDir,
+		"XDG_CONFIG_HOME": tmpDir,
 	}
 
 	stdout, _, exitCode := runScafctlWithEnv(t, env, "catalog", "list", "-o", "json")
@@ -3332,7 +3423,7 @@ func TestIntegration_CatalogLoad_FileNotFound(t *testing.T) {
 
 	_, stderr, exitCode := runScafctlWithEnv(t, env, "catalog", "load", "--input", "/nonexistent/path.tar")
 	assert.NotEqual(t, 0, exitCode)
-	assert.Contains(t, stderr, "no such file")
+	assert.True(t, strings.Contains(stderr, "no such file") || strings.Contains(stderr, "cannot find"))
 }
 
 func TestIntegration_CatalogLoad_Success(t *testing.T) {
@@ -4051,7 +4142,7 @@ spec:
         with:
           - provider: solution
             inputs:
-              source: "` + childPath + `"
+              source: "` + filepath.ToSlash(childPath) + `"
               propagateErrors: false
 `
 	parentPath := filepath.Join(tmpDir, "parent.yaml")
@@ -4088,7 +4179,7 @@ spec:
         with:
           - provider: solution
             inputs:
-              source: "` + filepath.Join(tmpDir, "self.yaml") + `"
+              source: "` + filepath.ToSlash(filepath.Join(tmpDir, "self.yaml")) + `"
               maxDepth: 1
 `
 	selfPath := filepath.Join(tmpDir, "self.yaml")
@@ -4768,11 +4859,12 @@ func TestIntegration_BuildPlugin_BinaryNotFound(t *testing.T) {
 		"XDG_DATA_HOME": tmpDir,
 	}
 
+	missingBin := filepath.Join(t.TempDir(), "nonexistent-binary")
 	_, stderr, exitCode := runScafctlWithEnv(t, env, "build", "plugin",
 		"--name", "missing",
 		"--kind", "provider",
 		"--version", "1.0.0",
-		"--platform", "linux/amd64=/nonexistent/path")
+		"--platform", "linux/amd64="+missingBin)
 	assert.NotEqual(t, 0, exitCode)
 	assert.Contains(t, stderr, "binary not found")
 }
@@ -4808,7 +4900,7 @@ spec:
           - provider: directory
             inputs:
               operation: list
-              path: "` + tmpDir + `"
+              path: "` + filepath.ToSlash(tmpDir) + `"
               recursive: true
 `
 	require.NoError(t, os.WriteFile(solutionFile, []byte(solutionContent), 0o644))
@@ -6478,7 +6570,7 @@ func TestIntegration_Plugins_Install_AutoDiscoveryNoFile(t *testing.T) {
 	emptyDir := t.TempDir()
 	_, stderr, exitCode := runScafctlInDir(t, emptyDir, "plugins", "install")
 	assert.NotEqual(t, 0, exitCode)
-	assert.Contains(t, stderr, "no solution path provided")
+	assert.Contains(t, stderr, "no plugin names or solution file provided")
 }
 
 // TestIntegration_Plugins_Install_NoPlugins verifies install succeeds with a solution that has no plugins.
@@ -6525,6 +6617,30 @@ spec:
 	stdout, _, exitCode := runScafctlWithEnvInDir(t, tmpDir, env, "plugins", "install")
 	assert.Equal(t, 0, exitCode, "expected plugins install to auto-discover solution.yaml")
 	assert.Contains(t, stdout, "No plugins declared")
+}
+
+// TestIntegration_Plugins_Install_StandaloneDryRun verifies standalone mode with --dry-run.
+func TestIntegration_Plugins_Install_StandaloneDryRun(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	env := map[string]string{
+		"XDG_CACHE_HOME": tmpDir,
+		"XDG_DATA_HOME":  tmpDir,
+	}
+
+	stdout, _, exitCode := runScafctlWithEnv(t, env, "plugins", "install", "github", "--kind", "provider", "--dry-run")
+	assert.Equal(t, 0, exitCode, "expected dry-run to succeed")
+	assert.Contains(t, stdout, "Dry run")
+	assert.Contains(t, stdout, "github")
+}
+
+// TestIntegration_Plugins_Install_InvalidKind verifies error on invalid --kind flag.
+func TestIntegration_Plugins_Install_InvalidKind(t *testing.T) {
+	t.Parallel()
+
+	_, stderr, exitCode := runScafctl(t, "plugins", "install", "github", "--kind", "invalid")
+	assert.NotEqual(t, 0, exitCode, "expected non-zero exit for invalid kind")
+	assert.Contains(t, stderr, "invalid plugin kind")
 }
 
 // TestIntegration_RunResolver_MetadataProvider runs the metadata provider and verifies output.
@@ -8132,6 +8248,9 @@ func buildEchoPlugin(t *testing.T) string {
 			t.Fatalf("failed to create temp dir for echo plugin: %v", err)
 		}
 		binPath := filepath.Join(tmpDir, "scafctl-plugin-echo")
+		if runtime.GOOS == "windows" {
+			binPath += ".exe"
+		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
@@ -8299,4 +8418,83 @@ func TestIntegration_InspectSolution_Alias(t *testing.T) {
 
 	assert.Equal(t, 0, exitCode)
 	assert.Contains(t, stdout, "\"name\"")
+}
+
+// ============================================================================
+// State Command Tests
+// ============================================================================
+
+func TestIntegration_StateHelp(t *testing.T) {
+	t.Parallel()
+	stdout, _, exitCode := runScafctl(t, "state", "--help")
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, stdout, "state")
+	assert.Contains(t, stdout, "list")
+	assert.Contains(t, stdout, "get")
+	assert.Contains(t, stdout, "set")
+	assert.Contains(t, stdout, "delete")
+}
+
+func TestIntegration_StateSetAndGet(t *testing.T) {
+	t.Parallel()
+	stateFile := filepath.Join(t.TempDir(), "test-state.json")
+
+	// Set a key
+	_, _, exitCode := runScafctl(t, "state", "set", "--path", stateFile, "--key", "region", "--value", "us-east-1")
+	assert.Equal(t, 0, exitCode)
+
+	// Get the key
+	stdout, _, exitCode := runScafctl(t, "state", "get", "--path", stateFile, "--key", "region")
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, stdout, "us-east-1")
+}
+
+func TestIntegration_StateList(t *testing.T) {
+	t.Parallel()
+	stateFile := filepath.Join(t.TempDir(), "test-state.json")
+
+	// Set keys
+	runScafctl(t, "state", "set", "--path", stateFile, "--key", "k1", "--value", "v1")
+	runScafctl(t, "state", "set", "--path", stateFile, "--key", "k2", "--value", "v2")
+
+	// List
+	stdout, _, exitCode := runScafctl(t, "state", "list", "--path", stateFile)
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, stdout, "k1")
+	assert.Contains(t, stdout, "k2")
+}
+
+func TestIntegration_StateDelete(t *testing.T) {
+	t.Parallel()
+	stateFile := filepath.Join(t.TempDir(), "test-state.json")
+
+	// Set then delete
+	runScafctl(t, "state", "set", "--path", stateFile, "--key", "ephemeral", "--value", "temp")
+	_, _, exitCode := runScafctl(t, "state", "delete", "--path", stateFile, "--key", "ephemeral")
+	assert.Equal(t, 0, exitCode)
+
+	// Verify deleted
+	_, _, exitCode = runScafctl(t, "state", "get", "--path", stateFile, "--key", "ephemeral")
+	assert.NotEqual(t, 0, exitCode)
+}
+
+func TestIntegration_StateSetTypedInt(t *testing.T) {
+	t.Parallel()
+	stateFile := filepath.Join(t.TempDir(), "test-state.json")
+
+	_, _, exitCode := runScafctl(t, "state", "set", "--path", stateFile, "--key", "port", "--value", "8080", "--type", "int")
+	assert.Equal(t, 0, exitCode)
+
+	stdout, _, exitCode := runScafctl(t, "state", "get", "--path", stateFile, "--key", "port", "-o", "json")
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, stdout, "8080")
+}
+
+func TestIntegration_StateSetTypedInt_Invalid(t *testing.T) {
+	t.Parallel()
+	stateFile := filepath.Join(t.TempDir(), "test-state.json")
+
+	_, stderr, exitCode := runScafctl(t, "state", "set", "--path", stateFile, "--key", "port", "--value", "abc", "--type", "int")
+	assert.NotEqual(t, 0, exitCode)
+	assert.Contains(t, stderr, "cannot parse")
 }

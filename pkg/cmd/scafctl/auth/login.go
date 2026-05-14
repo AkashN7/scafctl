@@ -14,9 +14,6 @@ import (
 	"github.com/MakeNowJust/heredoc/v2"
 	"github.com/oakwood-commons/kvx/pkg/tui"
 	"github.com/oakwood-commons/scafctl/pkg/auth"
-	"github.com/oakwood-commons/scafctl/pkg/auth/entra"
-	gcpauth "github.com/oakwood-commons/scafctl/pkg/auth/gcp"
-	ghauth "github.com/oakwood-commons/scafctl/pkg/auth/github"
 	"github.com/oakwood-commons/scafctl/pkg/catalog"
 	"github.com/oakwood-commons/scafctl/pkg/cmd/flags"
 	"github.com/oakwood-commons/scafctl/pkg/config"
@@ -240,17 +237,22 @@ func CommandLogin(cliParams *settings.Run, _ *terminal.IOStreams, _ string) *cob
 			// Route to handler-specific login logic
 			var loginErr error
 			switch handlerName {
-			case "github":
-				loginErr = loginGitHub(ctx, w, cliParams.BinaryName, flow, hostname, clientID, callbackPort, timeout, scopes, force, skipIfAuthenticated)
-			case "gcp":
-				loginErr = loginGCP(ctx, w, cliParams.BinaryName, flow, clientID, impersonateServiceAccount, callbackPort, timeout, scopes, force, skipIfAuthenticated)
 			case "entra":
-				loginErr = loginEntra(ctx, w, cliParams.BinaryName, flow, tenantID, clientID, callbackPort, timeout, federatedToken, flowStr, scopes, force, skipIfAuthenticated)
+				// If --federated-token is provided, set the env var for workload identity
+				if federatedToken != "" {
+					if setErr := os.Setenv("AZURE_FEDERATED_TOKEN", federatedToken); setErr != nil { //nolint:gosec // env var name, not credential
+						setErr = fmt.Errorf("failed to set federated token: %w", setErr)
+						w.Errorf("%v", setErr)
+						return exitcode.WithCode(setErr, exitcode.GeneralError)
+					}
+					// Auto-select workload identity flow if not explicitly set
+					if flowStr == "" {
+						flow = auth.FlowWorkloadIdentity
+					}
+				}
+				loginErr = loginWithFlowDetection(ctx, w, cliParams.BinaryName, handler, handlerName, flow, tenantID, callbackPort, timeout, scopes, force, skipIfAuthenticated, auth.FlowDeviceCode)
 			default:
-				// Generic custom OAuth2 handler (e.g. quay, custom IdP).
-				// Use the handler already resolved from the registry; no built-in
-				// flow-detection or provider-specific overrides apply.
-				loginErr = loginGeneric(ctx, w, cliParams.BinaryName, handler, handlerName, flow, callbackPort, timeout, scopes, force, skipIfAuthenticated)
+				loginErr = loginWithFlowDetection(ctx, w, cliParams.BinaryName, handler, handlerName, flow, tenantID, callbackPort, timeout, scopes, force, skipIfAuthenticated, auth.Flow(""))
 			}
 
 			if loginErr != nil {
@@ -272,24 +274,9 @@ func CommandLogin(cliParams *settings.Run, _ *terminal.IOStreams, _ string) *cob
 				return nil
 			}
 
-			var bridgeHandler auth.Handler
-			var bridgeErr error
-			switch handlerName {
-			case "github":
-				bridgeHandler, bridgeErr = getGitHubHandlerWithOverrides(ctx, hostname, clientID)
-			case "gcp":
-				bridgeHandler, bridgeErr = getGCPHandlerWithOverrides(ctx, clientID, impersonateServiceAccount)
-			case "entra":
-				bridgeHandler, bridgeErr = getEntraHandlerWithOverrides(ctx, tenantID, clientID)
-			default:
-				// Custom OAuth2 handlers have no CLI overrides; re-use the
-				// handler resolved at the start of this command.
-				bridgeHandler = handler
-			}
-			if bridgeErr != nil {
-				// Fall back to the pre-login handler rather than failing outright.
-				bridgeHandler = handler
-			}
+			// Use the handler already resolved from the registry; plugin
+			// handlers are already configured via ConfigureAuthHandler RPC.
+			bridgeHandler := handler
 
 			var lastBridgeErr error
 			for _, reg := range discovered {
@@ -331,172 +318,36 @@ func CommandLogin(cliParams *settings.Run, _ *terminal.IOStreams, _ string) *cob
 	return cmd
 }
 
-// loginGitHub handles the login flow for the GitHub auth handler.
-func loginGitHub(ctx context.Context, w *writer.Writer, binaryName string, flow auth.Flow, hostname, clientID string, callbackPort int, timeout time.Duration, scopes []string, force, skipIfAuthenticated bool) error {
-	// Auto-detect flow from available credentials.
-	// Skip PAT auto-detection when user provides --scope flags, since scopes
-	// only apply to the device code / interactive flows (PAT scopes are fixed at creation).
-	var detectors []auth.CredentialDetector
-	if len(scopes) == 0 {
-		detectors = append(detectors, auth.CredentialDetector{
-			HasCredentials: ghauth.HasPATCredentials,
-			Flow:           auth.FlowPAT,
-			Description:    "Detected GitHub token in environment variables",
-		})
-	}
-	detection := auth.DetectFlow(flow, detectors, auth.FlowDeviceCode)
-	flow = detection.Flow
-	if detection.Description != "" {
-		w.Info(detection.Description)
-	}
-
-	// Get or create handler
-	handler, err := getGitHubHandlerWithOverrides(ctx, hostname, clientID)
-	if err != nil {
-		err = fmt.Errorf("failed to initialize auth handler: %w", err)
-		w.Errorf("%v", err)
-		return exitcode.WithCode(err, exitcode.GeneralError)
-	}
-
-	// Check pre-login state
-	preLogin, err := auth.PreLoginCheck(ctx, handler, flow, force, skipIfAuthenticated, auth.FlowPAT)
-	if err != nil {
-		w.Errorf("%v", err)
-		return exitcode.WithCode(err, exitcode.GeneralError)
-	}
-	switch preLogin.Action {
-	case auth.PreLoginProceed:
-		// Continue with login
-	case auth.PreLoginSkip:
-		w.Infof("Already authenticated as %s — skipping login.", preLogin.Identity)
-		return nil
-	case auth.PreLoginAlreadyAuthenticated:
-		w.Warningf("Already authenticated as %s.", preLogin.Identity)
-		w.Warningf("Use '%s auth logout github' to sign out first, or use --force to re-authenticate.", binaryName)
-		w.Info("")
+// loginWithFlowDetection handles the login flow for any auth handler using the
+// FlowDetector interface for flow auto-detection. Handlers are resolved from
+// the registry (as plugins or built-in oauth2). Handler-specific credential
+// detection is delegated to the FlowDetector interface on the handler.
+func loginWithFlowDetection(ctx context.Context, w *writer.Writer, binaryName string, handler auth.Handler, handlerName string, flow auth.Flow, tenantID string, callbackPort int, timeout time.Duration, scopes []string, force, skipIfAuthenticated bool, defaultFlow auth.Flow) error {
+	// Use FlowDetector for auto-detection when no flow is explicitly set
+	if flow == "" {
+		if detector, ok := handler.(auth.FlowDetector); ok {
+			available, detectErr := detector.DetectAvailableFlows(ctx)
+			if detectErr == nil {
+				for _, fa := range available {
+					if fa.Available {
+						flow = auth.Flow(fa.Flow)
+						if fa.Reason != "" {
+							w.Info(fa.Reason)
+						}
+						break
+					}
+				}
+			}
+		}
+		// Fall back to the provided default flow
+		if flow == "" && defaultFlow != "" {
+			flow = defaultFlow
+		}
 	}
 
-	return executeLogin(ctx, w, binaryName, handler, flow, "", callbackPort, timeout, scopes)
-}
-
-// loginGCP handles the login flow for the GCP auth handler.
-func loginGCP(ctx context.Context, w *writer.Writer, binaryName string, flow auth.Flow, clientID, impersonateServiceAccount string, callbackPort int, timeout time.Duration, scopes []string, force, skipIfAuthenticated bool) error {
-	// Auto-detect flow based on available credentials (highest priority first)
-	detection := auth.DetectFlow(flow, []auth.CredentialDetector{
-		{
-			HasCredentials: gcpauth.HasWorkloadIdentityCredentials,
-			Flow:           auth.FlowWorkloadIdentity,
-			Description:    "Detected workload identity credentials in environment",
-		},
-		{
-			HasCredentials: gcpauth.HasServiceAccountCredentials,
-			Flow:           auth.FlowServicePrincipal,
-			Description:    "Detected service account key in environment",
-		},
-	}, auth.FlowInteractive)
-	flow = detection.Flow
-	if detection.Description != "" {
-		w.Info(detection.Description)
-	}
-
-	// Get or create handler with overrides
-	handler, err := getGCPHandlerWithOverrides(ctx, clientID, impersonateServiceAccount)
-	if err != nil {
-		err = fmt.Errorf("failed to initialize auth handler: %w", err)
-		w.Errorf("%v", err)
-		return exitcode.WithCode(err, exitcode.GeneralError)
-	}
-
-	// Check pre-login state (skip check for non-interactive flows except interactive and gcloud_adc)
+	// Pre-login check; skip for non-interactive flows.
 	preLogin, err := auth.PreLoginCheck(ctx, handler, flow, force, skipIfAuthenticated,
-		auth.FlowWorkloadIdentity, auth.FlowServicePrincipal, auth.FlowPAT, auth.FlowMetadata)
-	if err != nil {
-		w.Errorf("%v", err)
-		return exitcode.WithCode(err, exitcode.GeneralError)
-	}
-	switch preLogin.Action {
-	case auth.PreLoginProceed:
-		// Continue with login
-	case auth.PreLoginSkip:
-		w.Infof("Already authenticated as %s — skipping login.", preLogin.Identity)
-		return nil
-	case auth.PreLoginAlreadyAuthenticated:
-		w.Warningf("Already authenticated as %s.", preLogin.Identity)
-		w.Warningf("Use '%s auth logout gcp' to sign out first, or use --force to re-authenticate.", binaryName)
-		w.Info("")
-	}
-
-	return executeLogin(ctx, w, binaryName, handler, flow, "", callbackPort, timeout, scopes)
-}
-
-// loginEntra handles the login flow for the Entra auth handler.
-func loginEntra(ctx context.Context, w *writer.Writer, binaryName string, flow auth.Flow, tenantID, clientID string, callbackPort int, timeout time.Duration, federatedToken, flowStr string, scopes []string, force, skipIfAuthenticated bool) error {
-	// If --federated-token is provided, set the env var for workload identity
-	if federatedToken != "" {
-		if err := os.Setenv(entra.EnvAzureFederatedToken, federatedToken); err != nil {
-			err = fmt.Errorf("failed to set federated token: %w", err)
-			w.Errorf("%v", err)
-			return exitcode.WithCode(err, exitcode.GeneralError)
-		}
-		// Auto-select workload identity flow if not explicitly set
-		if flowStr == "" {
-			flow = auth.FlowWorkloadIdentity
-		}
-	}
-
-	// Auto-detect flow from available credentials
-	detection := auth.DetectFlow(flow, []auth.CredentialDetector{
-		{
-			HasCredentials: entra.HasWorkloadIdentityCredentials,
-			Flow:           auth.FlowWorkloadIdentity,
-			Description:    "Detected workload identity credentials in environment",
-		},
-		{
-			HasCredentials: entra.HasServicePrincipalCredentials,
-			Flow:           auth.FlowServicePrincipal,
-			Description:    "Detected service principal credentials in environment variables",
-		},
-	}, auth.FlowDeviceCode)
-	flow = detection.Flow
-	if detection.Description != "" {
-		w.Info(detection.Description)
-	}
-
-	// Get or create handler
-	handler, err := getEntraHandlerWithOverrides(ctx, tenantID, clientID)
-	if err != nil {
-		err = fmt.Errorf("failed to initialize auth handler: %w", err)
-		w.Errorf("%v", err)
-		return exitcode.WithCode(err, exitcode.GeneralError)
-	}
-
-	// Check pre-login state (skip check for service principal)
-	preLogin, err := auth.PreLoginCheck(ctx, handler, flow, force, skipIfAuthenticated, auth.FlowServicePrincipal)
-	if err != nil {
-		w.Errorf("%v", err)
-		return exitcode.WithCode(err, exitcode.GeneralError)
-	}
-	switch preLogin.Action {
-	case auth.PreLoginProceed:
-		// Continue with login
-	case auth.PreLoginSkip:
-		w.Infof("Already authenticated as %s — skipping login.", preLogin.Identity)
-		return nil
-	case auth.PreLoginAlreadyAuthenticated:
-		w.Warningf("Already authenticated as %s.", preLogin.Identity)
-		w.Warningf("Use '%s auth logout entra' to sign out first, or use --force to re-authenticate.", binaryName)
-		w.Info("")
-	}
-
-	return executeLogin(ctx, w, binaryName, handler, flow, tenantID, callbackPort, timeout, scopes)
-}
-
-// loginGeneric handles the login flow for custom (non-built-in) OAuth2 handlers.
-// It uses the handler already resolved from the auth registry so provider-specific
-// overrides (tenantID, hostname, etc.) do not apply.
-func loginGeneric(ctx context.Context, w *writer.Writer, binaryName string, handler auth.Handler, handlerName string, flow auth.Flow, callbackPort int, timeout time.Duration, scopes []string, force, skipIfAuthenticated bool) error {
-	// Pre-login check; skip for client_credentials since it is non-interactive.
-	preLogin, err := auth.PreLoginCheck(ctx, handler, flow, force, skipIfAuthenticated, auth.FlowClientCredentials)
+		auth.FlowServicePrincipal, auth.FlowWorkloadIdentity, auth.FlowPAT, auth.FlowClientCredentials, auth.FlowMetadata)
 	if err != nil {
 		w.Errorf("%v", err)
 		return exitcode.WithCode(err, exitcode.GeneralError)
@@ -513,7 +364,7 @@ func loginGeneric(ctx context.Context, w *writer.Writer, binaryName string, hand
 		w.Info("")
 	}
 
-	return executeLogin(ctx, w, binaryName, handler, flow, "", callbackPort, timeout, scopes)
+	return executeLogin(ctx, w, binaryName, handler, flow, tenantID, callbackPort, timeout, scopes)
 }
 
 // executeLogin runs the common login logic for any auth handler.

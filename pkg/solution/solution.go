@@ -12,6 +12,7 @@ import (
 	"github.com/Masterminds/semver/v3"
 	"github.com/oakwood-commons/scafctl/pkg/sourcepos"
 	"github.com/oakwood-commons/scafctl/pkg/spec"
+	"github.com/oakwood-commons/scafctl/pkg/state"
 	"gopkg.in/yaml.v3"
 )
 
@@ -84,6 +85,12 @@ type Solution struct {
 	// This is where the actual work of the solution is defined.
 	Spec Spec `json:"spec,omitempty" yaml:"spec,omitempty" doc:"Execution specification"`
 
+	// State configures optional per-solution persistence of resolver values across executions.
+	// When configured, resolvers with saveToState: true have their results persisted to a
+	// backend (e.g., local file, GitHub repo) and can be read back on subsequent runs via
+	// the state provider. State is opt-in -- solutions without this field are stateless.
+	State *state.Config `json:"state,omitempty" yaml:"state,omitempty" doc:"Optional state persistence configuration" required:"false"`
+
 	// path is an internal field for the file path where the solution was loaded from
 	path string `json:"-" yaml:"-"`
 
@@ -129,6 +136,13 @@ type Metadata struct {
 
 	// Banner is a URL or path to a banner image for the solution
 	Banner string `json:"banner,omitempty" yaml:"banner,omitempty" doc:"URL or path to the solution banner" maxLength:"500" pattern:"^((http|https|file):\\/\\/.+|[a-zA-Z0-9_-]+\\.(png|jpg|jpeg|svg|gif))$" required:"false"`
+
+	// Source is the URL to the solution's source code repository
+	Source string `json:"source,omitempty" yaml:"source,omitempty" doc:"URL to the solution source repository" maxLength:"500" required:"false"`
+
+	// Annotations is a free-form map of key-value metadata for tooling and humans.
+	// Not interpreted by the engine. Follows the Kubernetes annotation pattern.
+	Annotations map[string]string `json:"annotations,omitempty" yaml:"annotations,omitempty" doc:"Free-form key-value annotations" required:"false"`
 }
 
 // Catalog controls distribution and visibility of the solution.
@@ -388,6 +402,10 @@ func (s *Solution) Validate() error {
 		default:
 			problems = append(problems, "catalog.visibility must be public, private, or internal when set")
 		}
+	}
+
+	if s.State != nil && s.State.Backend.Provider == "" {
+		problems = append(problems, "state.backend.provider is required when state is configured")
 	}
 
 	if len(problems) > 0 {

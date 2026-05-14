@@ -43,6 +43,111 @@ func TestNewPool_Options(t *testing.T) {
 	assert.Equal(t, time.Minute, p.opts.healthInterval)
 }
 
+func TestNewPool_WithClientOptions(t *testing.T) {
+	reg := provider.NewRegistry()
+	opt1 := WithSanitizedEnv()
+	p := NewPool(nil, reg, logr.Discard(),
+		WithIdleTimeout(0),
+		WithClientOptions(opt1),
+	)
+	defer p.Shutdown()
+
+	assert.Len(t, p.opts.clientOpts, 1)
+}
+
+func TestNewPool_WithClientOptions_Multiple(t *testing.T) {
+	reg := provider.NewRegistry()
+	opt1 := WithSanitizedEnv()
+	opt2 := WithSanitizedEnv()
+	p := NewPool(nil, reg, logr.Discard(),
+		WithIdleTimeout(0),
+		WithClientOptions(opt1, opt2),
+	)
+	defer p.Shutdown()
+
+	assert.Len(t, p.opts.clientOpts, 2)
+}
+
+func TestNewPool_WithSanitizeEnv(t *testing.T) {
+	reg := provider.NewRegistry()
+
+	t.Run("defaults to true", func(t *testing.T) {
+		p := NewPool(nil, reg, logr.Discard())
+		defer p.Shutdown()
+		assert.True(t, p.SanitizeEnv())
+	})
+
+	t.Run("can be disabled", func(t *testing.T) {
+		p := NewPool(nil, reg, logr.Discard(), WithSanitizeEnv(false))
+		defer p.Shutdown()
+		assert.False(t, p.SanitizeEnv())
+	})
+
+	t.Run("can be explicitly enabled", func(t *testing.T) {
+		p := NewPool(nil, reg, logr.Discard(), WithSanitizeEnv(true))
+		defer p.Shutdown()
+		assert.True(t, p.SanitizeEnv())
+	})
+}
+
+func TestBuildSpawnClientOpts(t *testing.T) {
+	// applyOpts applies a slice of ClientOption to a fresh clientOptions struct
+	// and returns the result for assertion.
+	applyOpts := func(opts []ClientOption) clientOptions {
+		var co clientOptions
+		for _, o := range opts {
+			o(&co)
+		}
+		return co
+	}
+
+	t.Run("sanitize true prepends WithSanitizedEnv", func(t *testing.T) {
+		extra := []ClientOption{WithDebugLogging()} // dummy extra opt
+		opts := buildSpawnClientOpts(true, extra)
+		assert.Len(t, opts, 2)
+		// First option should set sanitizeEnv.
+		var first clientOptions
+		opts[0](&first)
+		assert.True(t, first.sanitizeEnv, "first option must set sanitizeEnv")
+		// All opts applied should have both flags.
+		co := applyOpts(opts)
+		assert.True(t, co.sanitizeEnv)
+		assert.True(t, co.debugLog)
+	})
+
+	t.Run("sanitize false does not prepend", func(t *testing.T) {
+		extra := []ClientOption{WithDebugLogging()}
+		opts := buildSpawnClientOpts(false, extra)
+		assert.Len(t, opts, 1)
+		co := applyOpts(opts)
+		assert.False(t, co.sanitizeEnv, "sanitizeEnv must not be set")
+		assert.True(t, co.debugLog)
+	})
+
+	t.Run("sanitize true with no extras", func(t *testing.T) {
+		opts := buildSpawnClientOpts(true, nil)
+		assert.Len(t, opts, 1)
+		co := applyOpts(opts)
+		assert.True(t, co.sanitizeEnv)
+	})
+
+	t.Run("sanitize false with no extras", func(t *testing.T) {
+		opts := buildSpawnClientOpts(false, nil)
+		assert.Empty(t, opts)
+	})
+
+	t.Run("sanitize true with multiple extras", func(t *testing.T) {
+		extra := []ClientOption{WithDebugLogging(), WithDebugLogging()}
+		opts := buildSpawnClientOpts(true, extra)
+		assert.Len(t, opts, 3)
+		// First must be the sanitize option.
+		var first clientOptions
+		opts[0](&first)
+		assert.True(t, first.sanitizeEnv)
+		assert.False(t, first.debugLog, "first option must only set sanitizeEnv")
+	})
+}
+
 func TestPool_Adopt(t *testing.T) {
 	reg := provider.NewRegistry()
 	p := NewPool(nil, reg, logr.Discard(), WithIdleTimeout(0))

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/go-logr/logr"
 	"github.com/oakwood-commons/scafctl/pkg/cmd/flags"
 	"github.com/oakwood-commons/scafctl/pkg/exitcode"
@@ -225,6 +226,33 @@ func TestSharedResolverOptions_GetEffectiveResolverConfig_NoFlagsChanged(t *test
 	cfg := opts.getEffectiveResolverConfig(context.Background())
 	assert.Equal(t, 30*time.Second, cfg.Timeout)
 	assert.Equal(t, 5*time.Minute, cfg.PhaseTimeout)
+}
+
+func TestSharedResolverOptions_AppendClientPluginOptions_NoCliParams(t *testing.T) {
+	t.Parallel()
+
+	opts := (&sharedResolverOptions{}).appendClientPluginOptions(nil)
+	assert.Len(t, opts, 0)
+}
+
+func TestSharedResolverOptions_AppendClientPluginOptions_NonDebug(t *testing.T) {
+	t.Parallel()
+
+	cliParams := settings.NewCliParams()
+	cliParams.MinLogLevel = logger.LevelInfo
+
+	opts := (&sharedResolverOptions{CliParams: cliParams}).appendClientPluginOptions(nil)
+	assert.Len(t, opts, 1)
+}
+
+func TestSharedResolverOptions_AppendClientPluginOptions_Debug(t *testing.T) {
+	t.Parallel()
+
+	cliParams := settings.NewCliParams()
+	cliParams.MinLogLevel = logger.LevelDebug
+
+	opts := (&sharedResolverOptions{CliParams: cliParams}).appendClientPluginOptions(nil)
+	assert.Len(t, opts, 2)
 }
 
 // ── shouldRedactSensitive tests ───────────────────────────────────────────────
@@ -631,6 +659,77 @@ func TestResolveVersionConstraintForFile_RejectsFilePaths(t *testing.T) {
 			assert.Contains(t, err.Error(), "--version can only be used with catalog names")
 		})
 	}
+}
+
+// ── buildCommandInfo tests ────────────────────────────────────────────────────
+
+func TestBuildCommandInfo(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		subcommand string
+		params     map[string]any
+		wantSub    string
+		wantParams map[string]string
+	}{
+		{
+			name:       "empty params",
+			subcommand: "run solution",
+			params:     nil,
+			wantSub:    "run solution",
+			wantParams: map[string]string{},
+		},
+		{
+			name:       "string params",
+			subcommand: "run resolver",
+			params:     map[string]any{"env": "prod", "count": 42},
+			wantSub:    "run resolver",
+			wantParams: map[string]string{"env": "prod", "count": "42"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			info := buildCommandInfo(tc.subcommand, tc.params)
+			assert.Equal(t, tc.wantSub, info.Subcommand)
+			assert.Equal(t, tc.wantParams, info.Parameters)
+		})
+	}
+}
+
+// ── buildStateSolutionMeta tests ──────────────────────────────────────────────
+
+func TestBuildStateSolutionMeta(t *testing.T) {
+	t.Parallel()
+
+	t.Run("with version", func(t *testing.T) {
+		t.Parallel()
+		sol := &solution.Solution{
+			Metadata: solution.Metadata{
+				Name: "my-solution",
+			},
+		}
+		sol.Metadata.Version, _ = semver.NewVersion("1.2.3")
+
+		meta := buildStateSolutionMeta(sol)
+		assert.Equal(t, "my-solution", meta.Name)
+		assert.Equal(t, "1.2.3", meta.Version)
+	})
+
+	t.Run("without version", func(t *testing.T) {
+		t.Parallel()
+		sol := &solution.Solution{
+			Metadata: solution.Metadata{
+				Name: "no-version",
+			},
+		}
+
+		meta := buildStateSolutionMeta(sol)
+		assert.Equal(t, "no-version", meta.Name)
+		assert.Empty(t, meta.Version)
+	})
 }
 
 // ── loadMockedResolvers tests ─────────────────────────────────────────────────

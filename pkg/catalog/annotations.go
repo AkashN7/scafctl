@@ -69,6 +69,12 @@ const (
 	// depends on the catalog implementation, so it must not be assumed to be
 	// descriptor-only or digest-stable.
 	AnnotationOrigin = "dev.scafctl.artifact.origin"
+
+	// AnnotationBuildCommit is the short git commit SHA at build time.
+	AnnotationBuildCommit = "dev.scafctl.build.commit"
+
+	// AnnotationBuildDirty indicates the working tree had uncommitted changes at build time.
+	AnnotationBuildDirty = "dev.scafctl.build.dirty"
 )
 
 // AnnotationBuilder helps construct annotation maps.
@@ -95,6 +101,17 @@ func (b *AnnotationBuilder) Set(key, value string) *AnnotationBuilder {
 func (b *AnnotationBuilder) SetTags(tags []string) *AnnotationBuilder {
 	if len(tags) > 0 {
 		b.annotations[AnnotationTags] = strings.Join(tags, ",")
+	}
+	return b
+}
+
+// SetMap merges all entries from the given map, skipping empty values.
+// Existing keys are overwritten.
+func (b *AnnotationBuilder) SetMap(m map[string]string) *AnnotationBuilder {
+	for k, v := range m {
+		if v != "" {
+			b.annotations[k] = v
+		}
 	}
 	return b
 }

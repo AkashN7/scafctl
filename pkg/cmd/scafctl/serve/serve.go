@@ -270,7 +270,9 @@ func preloadOfficialProviders(
 		return nil, fmt.Errorf("fetching official providers: %w", fetchErr)
 	}
 
-	clients, regErr := plugin.RegisterFetchedPlugins(ctx, reg, fetchResults, nil)
+	clientOpts := plugin.AuthClientOptsFromContext(ctx)
+
+	clients, regErr := plugin.RegisterFetchedPlugins(ctx, reg, fetchResults, nil, clientOpts...)
 	if regErr != nil {
 		return nil, fmt.Errorf("registering official providers: %w", regErr)
 	}
@@ -292,6 +294,10 @@ func buildPluginPool(ctx context.Context, cfg *config.Config, fetcher *plugin.Fe
 	}
 	if len(cfg.APIServer.Plugins.AllowedPlugins) > 0 {
 		poolOpts = append(poolOpts, plugin.WithAllowedPlugins(cfg.APIServer.Plugins.AllowedPlugins))
+	}
+	// Wire auth host dependencies so plugins can use host auth
+	if authOpts := plugin.AuthClientOptsFromContext(ctx); len(authOpts) > 0 {
+		poolOpts = append(poolOpts, plugin.WithClientOptions(authOpts...))
 	}
 	pool := plugin.NewPool(fetcher, reg, *lgr, poolOpts...)
 	for _, c := range preloaded {

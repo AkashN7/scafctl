@@ -15,6 +15,7 @@ import (
 	"github.com/oakwood-commons/scafctl/pkg/catalog"
 	"github.com/oakwood-commons/scafctl/pkg/metrics"
 	"github.com/oakwood-commons/scafctl/pkg/provider"
+	"github.com/oakwood-commons/scafctl/pkg/settings"
 	"github.com/oakwood-commons/scafctl/pkg/solution"
 	"github.com/oakwood-commons/scafctl/pkg/solution/bundler"
 )
@@ -29,6 +30,8 @@ type Fetcher struct {
 	noCache         bool
 	logger          logr.Logger
 	allowedCatalogs map[string]bool // if non-nil, only these catalog names are permitted
+	sigPolicy       *SignaturePolicy
+	sigVerifier     SignatureVerifier
 }
 
 // FetcherConfig configures a Fetcher.
@@ -54,6 +57,15 @@ type FetcherConfig struct {
 	// from. If empty, all catalogs are allowed.
 	AllowedCatalogs []string
 
+	// SignaturePolicy configures Sigstore/cosign signature verification.
+	// When nil or Mode is "off", no signature verification is performed.
+	SignaturePolicy *SignaturePolicy
+
+	// SignatureVerifier is the implementation used for OCI signature checks.
+	// When nil, NewSignatureVerifier() is used (cosign if built with the
+	// "cosign" tag, otherwise a no-op stub).
+	SignatureVerifier SignatureVerifier
+
 	// Logger for logging operations.
 	Logger logr.Logger
 }
@@ -72,7 +84,7 @@ func NewFetcher(cfg FetcherConfig) *Fetcher {
 
 	binaryName := cfg.BinaryName
 	if binaryName == "" {
-		binaryName = "scafctl" // fallback must match settings.CliBinaryName
+		binaryName = settings.CliBinaryName
 	}
 
 	var allowedCatalogs map[string]bool
@@ -83,6 +95,11 @@ func NewFetcher(cfg FetcherConfig) *Fetcher {
 		}
 	}
 
+	sigVerifier := cfg.SignatureVerifier
+	if sigVerifier == nil {
+		sigVerifier = NewSignatureVerifier()
+	}
+
 	return &Fetcher{
 		binaryName:      binaryName,
 		catalogFetcher:  catalog.NewPluginFetcher(cfg.Catalog, cfg.Logger),
@@ -91,6 +108,8 @@ func NewFetcher(cfg FetcherConfig) *Fetcher {
 		noCache:         cfg.NoCache,
 		logger:          cfg.Logger.WithName("plugin-fetcher"),
 		allowedCatalogs: allowedCatalogs,
+		sigPolicy:       cfg.SignaturePolicy,
+		sigVerifier:     sigVerifier,
 	}
 }
 
@@ -113,6 +132,13 @@ type FetchResult struct {
 
 	// FromCache indicates whether the binary was served from cache.
 	FromCache bool
+
+	// Signature holds signature verification metadata when verification
+	// was performed. Nil when signatures are disabled or the binary was cached.
+	//
+	// TODO: surface Signature in CLI output/audit log so users can inspect
+	// verification results after a fetch.
+	Signature *SignatureResult
 
 	// Catalog is the catalog name the plugin was fetched from (empty if cached).
 	Catalog string
@@ -169,6 +195,7 @@ func (f *Fetcher) fetchOne(ctx context.Context, dep solution.PluginDependency, l
 // doFetchOne performs the actual resolution and fetch logic for a single plugin.
 func (f *Fetcher) doFetchOne(ctx context.Context, dep solution.PluginDependency, lockPlugins []bundler.LockPlugin) (FetchResult, error) {
 	kind := pluginKindToArtifactKind(dep.Kind)
+	cacheKey := PluginCacheKey(dep.Name, dep.Kind)
 
 	// Check lock file for a pinned version
 	locked := findLockPlugin(lockPlugins, dep.Name, string(dep.Kind))
@@ -194,7 +221,7 @@ func (f *Fetcher) doFetchOne(ctx context.Context, dep solution.PluginDependency,
 		// No lock file — prefer cached version to avoid network latency.
 		// Only resolve from catalog if no cached version exists.
 		if !f.noCache {
-			if cachedPath, cachedVer, ok := f.cache.GetLatestCached(dep.Name, f.platform); ok {
+			if cachedPath, cachedVer, ok := f.cache.GetLatestCached(cacheKey, f.platform); ok {
 				// If a version constraint is specified, verify the cached version satisfies it.
 				useCached := true
 				if dep.Version != "" && !strings.EqualFold(dep.Version, "latest") {
@@ -234,7 +261,7 @@ func (f *Fetcher) doFetchOne(ctx context.Context, dep solution.PluginDependency,
 		if err != nil {
 			// Fallback: if catalog resolution fails, check if a cached version exists.
 			if !f.noCache {
-				if cachedPath, cachedVer, ok := f.cache.GetLatestCached(dep.Name, f.platform); ok {
+				if cachedPath, cachedVer, ok := f.cache.GetLatestCached(cacheKey, f.platform); ok {
 					// Security: reject cached plugins when an allowlist is configured
 					// but cache lacks catalog origin metadata.
 					if allowErr := f.checkCatalogAllowed(""); allowErr != nil {
@@ -282,9 +309,14 @@ func (f *Fetcher) doFetchOne(ctx context.Context, dep solution.PluginDependency,
 		}
 	}
 
-	// Check local cache
-	if !f.noCache {
-		if cachedPath, ok := f.cache.Get(dep.Name, version, f.platform, expectedDigest); ok {
+	// Check local cache.
+	//
+	// In enforce mode, cache reads are skipped so every execution performs a
+	// fresh fetch with signature verification. In warn mode, cache hits are
+	// allowed because verification is advisory.
+	skipCache := f.noCache || (f.sigPolicy != nil && f.sigPolicy.Mode == SignatureModeEnforce)
+	if !skipCache {
+		if cachedPath, ok := f.cache.Get(cacheKey, version, f.platform, expectedDigest); ok {
 			f.logger.V(1).Info("plugin found in cache",
 				"name", dep.Name,
 				"version", version,
@@ -339,8 +371,17 @@ func (f *Fetcher) doFetchOne(ctx context.Context, dep solution.PluginDependency,
 		)
 	}
 
+	// Signature verification (after digest passes, before caching).
+	var sigResult *SignatureResult
+	if f.sigPolicy.IsEnabled() && fetchInfo.ImageRef != "" {
+		sigResult, err = f.verifySignature(ctx, dep.Name, version, fetchInfo.ImageRef)
+		if err != nil {
+			return FetchResult{}, err
+		}
+	}
+
 	// Write to cache
-	cachedPath, err := f.cache.Put(dep.Name, version, f.platform, data)
+	cachedPath, err := f.cache.Put(cacheKey, version, f.platform, data)
 	if err != nil {
 		return FetchResult{}, fmt.Errorf("caching binary: %w", err)
 	}
@@ -348,7 +389,7 @@ func (f *Fetcher) doFetchOne(ctx context.Context, dep solution.PluginDependency,
 	digest := fetchInfo.Digest
 	if digest == "" {
 		// Compute digest from the downloaded data
-		d, err := f.cache.Digest(dep.Name, version, f.platform)
+		d, err := f.cache.Digest(cacheKey, version, f.platform)
 		if err == nil {
 			digest = d
 		}
@@ -373,7 +414,36 @@ func (f *Fetcher) doFetchOne(ctx context.Context, dep solution.PluginDependency,
 		Digest:    digest,
 		FromCache: false,
 		Catalog:   resolvedFrom,
+		Signature: sigResult,
 	}, nil
+}
+
+// verifySignature performs Sigstore/cosign signature verification against the
+// configured policy. In "warn" mode, failures are logged but do not block
+// execution. In "enforce" mode, failures return an error.
+func (f *Fetcher) verifySignature(ctx context.Context, name, version, imageRef string) (*SignatureResult, error) {
+	f.logger.V(1).Info("verifying plugin signature",
+		"name", name,
+		"version", version,
+		"imageRef", imageRef,
+		"mode", string(f.sigPolicy.Mode))
+
+	result, err := f.sigVerifier.VerifySignature(ctx, imageRef, f.sigPolicy)
+	if err != nil {
+		wrapped := fmt.Errorf("plugin %s@%s: %w", name, version, err)
+		return nil, HandleVerificationError(f.sigPolicy, wrapped, f.logger,
+			"name", name, "version", version)
+	}
+
+	if result != nil && result.Verified {
+		f.logger.V(1).Info("plugin signature verified",
+			"name", name,
+			"version", version,
+			"issuer", result.Issuer,
+			"identity", result.Identity)
+	}
+
+	return result, nil
 }
 
 // Paths returns just the binary paths from a slice of FetchResult.
@@ -478,7 +548,8 @@ func RegisterFetchedAuthHandlerPlugins(ctx context.Context, registry *auth.Regis
 			return nil, fmt.Errorf("getting auth handlers from plugin %s: %w", r.Name, err)
 		}
 
-		configureAndRegisterAuthHandlers(ctx, registry, client, handlers, cfg)
+		registered := configureAndRegisterAuthHandlers(ctx, registry, client, handlers, cfg)
+		propagateStartupLatency(ctx, registry, client, registered)
 
 		clients = append(clients, client)
 	}
@@ -498,6 +569,18 @@ func pluginKindToArtifactKind(kind solution.PluginKind) catalog.ArtifactKind {
 	}
 }
 
+// PluginCacheKey returns a cache-safe key for a plugin that avoids namespace
+// collisions between different plugin kinds. Provider plugins use the bare
+// name (e.g. "github") for backward compatibility with existing caches.
+// Auth-handler plugins are prefixed (e.g. "auth-handler-github") so a provider
+// named "github" and an auth-handler named "github" occupy separate cache slots.
+func PluginCacheKey(name string, kind solution.PluginKind) string {
+	if kind == solution.PluginKindAuthHandler {
+		return "auth-handler-" + name
+	}
+	return name
+}
+
 // findLockPlugin looks up a lock plugin entry by name and kind.
 // checkCatalogAllowed returns an error if the catalog is not in the
 // configured allowlist. If no allowlist is configured, all catalogs are
@@ -514,6 +597,28 @@ func (f *Fetcher) checkCatalogAllowed(resolvedFrom string) error {
 		return fmt.Errorf("catalog %q is not in the allowed catalogs list", resolvedFrom)
 	}
 	return nil
+}
+
+// RegisterCachedPlugin looks up a provider plugin by name in the local cache,
+// starts it, and registers its providers into the given registry.
+// Returns the created clients (caller must Kill them on cleanup) or an error
+// if the plugin is not cached.
+func RegisterCachedPlugin(ctx context.Context, name string, registry *provider.Registry, cfg *ProviderConfig, cacheDir string, clientOpts ...ClientOption) ([]*Client, error) {
+	cache := NewCache(cacheDir)
+	path, version, ok := cache.GetLatestBinary(name)
+	if !ok {
+		return nil, fmt.Errorf("plugin %q not found in cache", name)
+	}
+
+	results := []FetchResult{{
+		Name:      name,
+		Kind:      solution.PluginKindProvider,
+		Version:   version,
+		Path:      path,
+		FromCache: true,
+	}}
+
+	return RegisterFetchedPlugins(ctx, registry, results, cfg, clientOpts...)
 }
 
 func findLockPlugin(plugins []bundler.LockPlugin, name, kind string) *bundler.LockPlugin {

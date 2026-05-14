@@ -1,0 +1,73 @@
+name: Sign Plugin OCI Artifact
+
+# Reusable workflow for signing plugin OCI artifacts with cosign (keyless OIDC).
+# Plugin repositories call this workflow after pushing their release artifact
+# to an OCI registry. The signature is stored alongside the artifact in the
+# same registry and can be verified by scafctl during plugin fetch.
+#
+# Versioning:
+#   This workflow is pinned by callers via the `sign-plugin/v1` tag.
+#   After merging changes, update the tag to the current HEAD of main:
+#     git checkout main && git pull
+#     git tag -f sign-plugin/v1 HEAD
+#     git push --force-with-lease origin refs/tags/sign-plugin/v1
+#   This propagates the change to all plugin repos on their next workflow run.
+#
+# Usage in plugin repos:
+#   jobs:
+#     sign:
+#       uses: oakwood-commons/scafctl/.github/workflows/sign-plugin.yml@sign-plugin/v1
+#       with:
+#         image-ref: ghcr.io/oakwood-commons/providers/sleep@sha256:abc123...
+#       permissions:
+#         id-token: write
+#         packages: write
+
+on:
+  workflow_call:
+    inputs:
+      image-ref:
+        description: 'Full OCI image reference to sign (registry/repo@digest)'
+        required: true
+        type: string
+      cosign-version:
+        description: 'Cosign version to install'
+        required: false
+        type: string
+        default: 'v2.6.3'
+
+permissions:
+  id-token: write   # Required for OIDC token (Fulcio certificate issuance)
+  packages: write   # Required to push signature to registry
+
+jobs:
+  sign:
+    name: Cosign Sign
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: ${{ inputs.cosign-version }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sign artifact with cosign (keyless)
+        env:
+          IMAGE_REF: ${{ inputs.image-ref }}
+        run: |
+          cosign sign --yes --recursive "$IMAGE_REF"
+
+      - name: Verify signature
+        env:
+          IMAGE_REF: ${{ inputs.image-ref }}
+        run: |
+          cosign verify \
+            --certificate-identity-regexp="^https://github\.com/oakwood-commons/scafctl/\.github/workflows/sign-plugin\.yml@refs/tags/sign-plugin/v[0-9]+$" \
+            --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+            "$IMAGE_REF"

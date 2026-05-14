@@ -139,6 +139,15 @@ func NewHTTPProvider() *HTTPProvider {
 				if !ok {
 					return "", nil
 				}
+				operation, _ := inputs["operation"].(string)
+				switch operation {
+				case "state_load":
+					return fmt.Sprintf("Would load state from %s", inputs[fieldURL]), nil
+				case "state_save":
+					return fmt.Sprintf("Would save state to %s", inputs[fieldURL]), nil
+				case "state_delete":
+					return fmt.Sprintf("Would delete state at %s", inputs[fieldURL]), nil
+				}
 				method, _ := inputs[fieldMethod].(string)
 				if method == "" {
 					method = "GET"
@@ -150,8 +159,12 @@ func NewHTTPProvider() *HTTPProvider {
 				provider.CapabilityFrom,
 				provider.CapabilityAction,
 				provider.CapabilityTransform,
+				provider.CapabilityState,
 			},
 			Schema: schemahelper.ObjectSchema([]string{fieldURL}, map[string]*jsonschema.Schema{
+				"operation": schemahelper.StringProp("Operation to perform. Only used for state operations.",
+					schemahelper.WithEnum("state_load", "state_save", "state_delete")),
+				"data": schemahelper.AnyProp("The full StateData object to persist (required for state_save operation)"),
 				fieldURL: schemahelper.StringProp("The URL to request",
 					schemahelper.WithExample("https://api.example.com/users"),
 					schemahelper.WithMaxLength(*ptrs.IntPtr(2048)),
@@ -204,7 +217,7 @@ func NewHTTPProvider() *HTTPProvider {
 					"pageSizeParam": schemahelper.StringProp("Query parameter name for page size (pageNumber strategy, default: 'pageSize')",
 						schemahelper.WithExample("pageSize"),
 						schemahelper.WithMaxLength(*ptrs.IntPtr(100))),
-					"pageSize": schemahelper.IntProp("Page size for pageNumber strategy",
+					"pageSize": schemahelper.IntProp("Page size. Required for pageNumber strategy; also used as __pageSize in bodyTemplate for any strategy.",
 						schemahelper.WithExample(50),
 						schemahelper.WithMaximum(*ptrs.Float64Ptr(10000))),
 					"startPage": schemahelper.IntProp("Starting page number for pageNumber strategy (default: 1)",
@@ -229,6 +242,9 @@ func NewHTTPProvider() *HTTPProvider {
 					"collectPath": schemahelper.StringProp("CEL expression to extract items from each page's response body. Items are accumulated across pages into a single array.",
 						schemahelper.WithExample("body.items"),
 						schemahelper.WithMaxLength(*ptrs.IntPtr(500))),
+					"bodyTemplate": schemahelper.StringProp("CEL expression evaluated per-page to generate the request body. Enables POST-based pagination (GraphQL, Elasticsearch). When set, overrides the top-level body field. Available variables: __page (1-indexed), __pageSize, __offset, __cursor.",
+						schemahelper.WithExample(`'{"query":"{ items(page: ' + string(__page) + ', size: ' + string(__pageSize) + ') { results { id } } }"}'`),
+						schemahelper.WithMaxLength(*ptrs.IntPtr(50000))),
 				}),
 				"authProvider": schemahelper.StringProp("Authentication provider to use for this request (e.g., 'entra'). When set, the provider will automatically obtain and inject an access token.",
 					schemahelper.WithExample("entra"),
@@ -260,6 +276,10 @@ func NewHTTPProvider() *HTTPProvider {
 					fieldHeaders: schemahelper.AnyProp("Response headers (last page when paginating)"),
 					"pages":      schemahelper.IntProp("Number of pages fetched (only present when pagination is configured)", schemahelper.WithExample(3)),
 					"totalItems": schemahelper.IntProp("Total number of items collected across all pages (only present when pagination is configured)", schemahelper.WithExample(150)),
+				}),
+				provider.CapabilityState: schemahelper.ObjectSchema([]string{"success"}, map[string]*jsonschema.Schema{
+					"success": schemahelper.BoolProp("Whether the state operation succeeded"),
+					"data":    schemahelper.AnyProp("The loaded state data (for state_load operation)"),
 				}),
 			},
 			Examples: []provider.Example{
@@ -458,6 +478,11 @@ func (p *HTTPProvider) Execute(ctx context.Context, input any) (*provider.Output
 
 	lgr.V(1).Info("executing provider", "provider", ProviderName, fieldURL, inputs[fieldURL])
 
+	// State operations use a dedicated dispatch path
+	if operation, _ := inputs["operation"].(string); strings.HasPrefix(operation, "state_") {
+		return p.dispatchStateOperation(ctx, operation, inputs)
+	}
+
 	// Check for dry-run mode
 	if provider.DryRunFromContext(ctx) {
 		return &provider.Output{
@@ -588,6 +613,9 @@ func (p *HTTPProvider) Execute(ctx context.Context, input any) (*provider.Output
 
 	// If pagination is configured, use the paginated execution path
 	if pagCfg != nil {
+		if pagCfg.BodyTemplate != "" && !methodSupportsBody(method) {
+			return nil, fmt.Errorf("%s: pagination bodyTemplate requires method POST, PUT, or PATCH (got %q)", ProviderName, method)
+		}
 		return p.executePaginated(ctx, httpClient, method, urlStr, bodyContent, headers, pagCfg)
 	}
 

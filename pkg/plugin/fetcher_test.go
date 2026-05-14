@@ -391,6 +391,80 @@ func TestFetcher_FetchPlugins_NoCache_BypassesCachedBinary(t *testing.T) {
 	assert.Equal(t, "1.0.0", results[0].Version)
 }
 
+func TestFetcher_FetchPlugins_EnforceMode_BypassesCache(t *testing.T) {
+	cat := newMockCatalog()
+	ref := testRef("signed-plugin", "1.0.0")
+	cat.addArtifact(ref, []byte("fresh-binary"))
+
+	cacheDir := t.TempDir()
+	cache := NewCache(cacheDir)
+
+	// Pre-populate cache
+	_, err := cache.Put("signed-plugin", "1.0.0", "linux/amd64", []byte("fresh-binary"))
+	require.NoError(t, err)
+
+	f := NewFetcher(FetcherConfig{
+		Catalog:  cat,
+		Cache:    cache,
+		Platform: "linux/amd64",
+		Logger:   logr.Discard(),
+		SignaturePolicy: &SignaturePolicy{
+			Mode:              SignatureModeEnforce,
+			TrustedIssuers:    []string{"https://token.actions.githubusercontent.com"},
+			TrustedIdentities: []string{"https://github.com/org/*"},
+		},
+	})
+
+	deps := []solution.PluginDependency{
+		{Name: "signed-plugin", Kind: solution.PluginKindProvider, Version: "1.0.0"},
+	}
+	lock := []bundler.LockPlugin{
+		{Name: "signed-plugin", Kind: "provider", Version: "1.0.0", Digest: binaryDigest([]byte("fresh-binary")), ResolvedFrom: "test"},
+	}
+
+	results, err := f.FetchPlugins(context.Background(), deps, lock)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.False(t, results[0].FromCache, "enforce mode must bypass cache for signature verification")
+}
+
+func TestFetcher_FetchPlugins_WarnMode_UsesCache(t *testing.T) {
+	cat := newMockCatalog()
+	ref := testRef("warn-plugin", "1.0.0")
+	cat.addArtifact(ref, []byte("the-binary"))
+
+	cacheDir := t.TempDir()
+	cache := NewCache(cacheDir)
+
+	// Pre-populate cache
+	_, err := cache.Put("warn-plugin", "1.0.0", "linux/amd64", []byte("cached-binary"))
+	require.NoError(t, err)
+
+	f := NewFetcher(FetcherConfig{
+		Catalog:  cat,
+		Cache:    cache,
+		Platform: "linux/amd64",
+		Logger:   logr.Discard(),
+		SignaturePolicy: &SignaturePolicy{
+			Mode:              SignatureModeWarn,
+			TrustedIssuers:    []string{"https://token.actions.githubusercontent.com"},
+			TrustedIdentities: []string{"https://github.com/org/*"},
+		},
+	})
+
+	deps := []solution.PluginDependency{
+		{Name: "warn-plugin", Kind: solution.PluginKindProvider, Version: "1.0.0"},
+	}
+	lock := []bundler.LockPlugin{
+		{Name: "warn-plugin", Kind: "provider", Version: "1.0.0", ResolvedFrom: "test"},
+	}
+
+	results, err := f.FetchPlugins(context.Background(), deps, lock)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.True(t, results[0].FromCache, "warn mode should allow cache hits")
+}
+
 func TestFetcher_FetchPlugins_NoCache_BypassesLatestCached(t *testing.T) {
 	cat := newMockCatalog()
 	ref := testRef("unlocked-plugin", "2.0.0")
@@ -647,4 +721,49 @@ func TestFetcher_CacheFallback_AllowlistRejects(t *testing.T) {
 	_, err := f.FetchPlugins(context.Background(), deps, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot verify against allowlist")
+}
+
+// ── RegisterCachedPlugin tests ──────────────────────────────────────────────
+
+func TestRegisterCachedPlugin_NotCached(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	reg := provider.NewRegistry()
+
+	// Use a unique name that won't exist in any real cache.
+	clients, err := RegisterCachedPlugin(ctx, "nonexistent-plugin-for-test-"+t.Name(), reg, nil, t.TempDir())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found in cache")
+	assert.Nil(t, clients)
+}
+
+func TestPluginCacheKey(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		kind solution.PluginKind
+		want string
+	}{
+		{"github", solution.PluginKindProvider, "github"},
+		{"exec", solution.PluginKindProvider, "exec"},
+		{"github", solution.PluginKindAuthHandler, "auth-handler-github"},
+		{"entra", solution.PluginKindAuthHandler, "auth-handler-entra"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.want, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, PluginCacheKey(tc.name, tc.kind))
+		})
+	}
+}
+
+func TestPluginCacheKey_NamespaceIsolation(t *testing.T) {
+	t.Parallel()
+
+	// A provider and auth-handler with the same name must produce different cache keys.
+	providerKey := PluginCacheKey("github", solution.PluginKindProvider)
+	authKey := PluginCacheKey("github", solution.PluginKindAuthHandler)
+	assert.NotEqual(t, providerKey, authKey)
 }

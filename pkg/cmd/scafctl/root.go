@@ -11,10 +11,8 @@ import (
 
 	"github.com/MakeNowJust/heredoc/v2"
 	"github.com/oakwood-commons/scafctl/pkg/auth"
-	"github.com/oakwood-commons/scafctl/pkg/auth/entra"
-	gcpauth "github.com/oakwood-commons/scafctl/pkg/auth/gcp"
-	ghauth "github.com/oakwood-commons/scafctl/pkg/auth/github"
 	customoauth2 "github.com/oakwood-commons/scafctl/pkg/auth/oauth2"
+	authofficial "github.com/oakwood-commons/scafctl/pkg/auth/official"
 	"github.com/oakwood-commons/scafctl/pkg/celexp"
 	authcmd "github.com/oakwood-commons/scafctl/pkg/cmd/scafctl/auth"
 	"github.com/oakwood-commons/scafctl/pkg/cmd/scafctl/build"
@@ -39,6 +37,7 @@ import (
 	servecmd "github.com/oakwood-commons/scafctl/pkg/cmd/scafctl/serve"
 	"github.com/oakwood-commons/scafctl/pkg/cmd/scafctl/snapshot"
 	solutioncmd "github.com/oakwood-commons/scafctl/pkg/cmd/scafctl/solution"
+	statecmd "github.com/oakwood-commons/scafctl/pkg/cmd/scafctl/state"
 	testcmd "github.com/oakwood-commons/scafctl/pkg/cmd/scafctl/test"
 	vendorcmd "github.com/oakwood-commons/scafctl/pkg/cmd/scafctl/vendor"
 	"github.com/oakwood-commons/scafctl/pkg/cmd/scafctl/version"
@@ -53,6 +52,7 @@ import (
 	"github.com/oakwood-commons/scafctl/pkg/provider/official"
 	"github.com/oakwood-commons/scafctl/pkg/secrets"
 	"github.com/oakwood-commons/scafctl/pkg/settings"
+	solprepare "github.com/oakwood-commons/scafctl/pkg/solution/prepare"
 	"github.com/oakwood-commons/scafctl/pkg/telemetry"
 	"github.com/oakwood-commons/scafctl/pkg/terminal"
 	"github.com/oakwood-commons/scafctl/pkg/terminal/input"
@@ -171,6 +171,19 @@ type RootOptions struct {
 	// Embedders can supply a custom registry via official.NewRegistryFrom to
 	// extend or replace the default set.
 	OfficialProviders *official.Registry
+
+	// OfficialAuthHandlers overrides the default official auth handler registry
+	// used for auto-resolution. When nil and DisableOfficialAuthHandlers is
+	// false, the default registry (3 extracted first-party auth handlers) is
+	// used. Embedders can supply a custom registry via
+	// authofficial.NewRegistryFrom to extend or replace the default set.
+	OfficialAuthHandlers *authofficial.Registry
+
+	// PluginSignaturePolicy overrides the plugin signature verification policy.
+	// When nil, the policy is derived from the app configuration
+	// (config.Plugins.Signatures). Embedders can supply a policy directly
+	// to enforce stricter verification without relying on user config.
+	PluginSignaturePolicy *plugin.SignaturePolicy
 }
 
 // NewRootOptions returns a RootOptions with production defaults
@@ -433,81 +446,8 @@ func Root(opts *RootOptions) *cobra.Command {
 				lgr.V(1).Info("shared secrets store unavailable; auth handlers will create their own", "error", secretErr)
 			}
 
-			// Initialize auth registry with Entra handler
+			// Initialize auth registry
 			authRegistry := auth.NewRegistry()
-			var entraOpts []entra.Option
-			if cfg.Auth.Entra != nil {
-				entraOpts = append(entraOpts, entra.WithConfig(&entra.Config{
-					ClientID:      cfg.Auth.Entra.ClientID,
-					TenantID:      cfg.Auth.Entra.TenantID,
-					DefaultScopes: cfg.Auth.Entra.DefaultScopes,
-					DefaultFlow:   cfg.Auth.Entra.DefaultFlow,
-				}))
-			}
-			entraOpts = append(entraOpts, entra.WithLogger(*lgr))
-			if secretErr == nil {
-				entraOpts = append(entraOpts, entra.WithSecretStore(sharedSecretStore))
-			}
-			entraHandler, err := entra.New(entraOpts...)
-			if err != nil {
-				lgr.V(1).Info("warning: failed to initialize Entra auth handler", "error", err)
-			} else {
-				if regErr := authRegistry.Register(entraHandler); regErr != nil {
-					lgr.V(1).Info("warning: failed to register Entra auth handler", "error", regErr)
-				}
-			}
-
-			// Initialize GitHub auth handler
-			var ghOpts []ghauth.Option
-			if cfg.Auth.GitHub != nil {
-				ghOpts = append(ghOpts, ghauth.WithConfig(&ghauth.Config{
-					ClientID:             cfg.Auth.GitHub.ClientID,
-					ClientSecret:         cfg.Auth.GitHub.ClientSecret,
-					Hostname:             cfg.Auth.GitHub.Hostname,
-					DefaultScopes:        cfg.Auth.GitHub.DefaultScopes,
-					AppID:                cfg.Auth.GitHub.AppID,
-					InstallationID:       cfg.Auth.GitHub.InstallationID,
-					PrivateKey:           cfg.Auth.GitHub.PrivateKey,
-					PrivateKeyPath:       cfg.Auth.GitHub.PrivateKeyPath,
-					PrivateKeySecretName: cfg.Auth.GitHub.PrivateKeySecretName,
-				}))
-			}
-			ghOpts = append(ghOpts, ghauth.WithLogger(*lgr))
-			if secretErr == nil {
-				ghOpts = append(ghOpts, ghauth.WithSecretStore(sharedSecretStore))
-			}
-			ghHandler, err := ghauth.New(ghOpts...)
-			if err != nil {
-				lgr.V(1).Info("warning: failed to initialize GitHub auth handler", "error", err)
-			} else {
-				if regErr := authRegistry.Register(ghHandler); regErr != nil {
-					lgr.V(1).Info("warning: failed to register GitHub auth handler", "error", regErr)
-				}
-			}
-
-			// Initialize GCP auth handler
-			var gcpOpts []gcpauth.Option
-			if cfg.Auth.GCP != nil {
-				gcpOpts = append(gcpOpts, gcpauth.WithConfig(&gcpauth.Config{
-					ClientID:                  cfg.Auth.GCP.ClientID,
-					ClientSecret:              cfg.Auth.GCP.ClientSecret,
-					DefaultScopes:             cfg.Auth.GCP.DefaultScopes,
-					ImpersonateServiceAccount: cfg.Auth.GCP.ImpersonateServiceAccount,
-					Project:                   cfg.Auth.GCP.Project,
-				}))
-			}
-			gcpOpts = append(gcpOpts, gcpauth.WithLogger(*lgr))
-			if secretErr == nil {
-				gcpOpts = append(gcpOpts, gcpauth.WithSecretStore(sharedSecretStore))
-			}
-			gcpHandler, err := gcpauth.New(gcpOpts...)
-			if err != nil {
-				lgr.V(1).Info("warning: failed to initialize GCP auth handler", "error", err)
-			} else {
-				if regErr := authRegistry.Register(gcpHandler); regErr != nil {
-					lgr.V(1).Info("warning: failed to register GCP auth handler", "error", regErr)
-				}
-			}
 
 			// Register custom OAuth2 handlers from config
 			for _, customCfg := range cfg.Auth.CustomOAuth2 {
@@ -534,6 +474,27 @@ func Root(opts *RootOptions) *cobra.Command {
 				}
 			}
 
+			// ── Wire official auth handler registry for auto-resolution ──
+			// Same pattern as official providers. When the embedder provides a
+			// custom registry, use it. Otherwise, use the default registry
+			// unless disabled in config.
+			// NOTE: This must be wired before RegisterAuthHandlerPlugins so that
+			// configureAndRegisterAuthHandlers can read per-handler TrustedVerificationDomains.
+			if !cfg.Settings.DisableOfficialAuthHandlers {
+				officialAuthReg := opts.OfficialAuthHandlers
+				if officialAuthReg == nil {
+					officialAuthReg = authofficial.NewRegistry()
+				}
+				source := "default"
+				if opts.OfficialAuthHandlers != nil {
+					source = "embedder"
+				}
+				lgr.V(1).Info("official auth handler registry enabled", "count", officialAuthReg.Len(), "source", source)
+				ctx = authofficial.WithRegistry(ctx, officialAuthReg)
+			} else {
+				lgr.V(1).Info("official auth handler registry disabled via config")
+			}
+
 			// Register auth handler plugins if directories are configured
 			if len(opts.AuthPluginDirs) > 0 {
 				lgr.V(1).Info("loading auth handler plugins", "dirs", opts.AuthPluginDirs)
@@ -550,6 +511,47 @@ func Root(opts *RootOptions) *cobra.Command {
 			}
 
 			ctx = auth.WithRegistry(ctx, authRegistry)
+
+			// Wire plugin signature policy unconditionally so all downstream
+			// plugin operations (auth handlers, providers, solution prepare)
+			// respect the embedder's policy regardless of feature flags.
+			if opts.PluginSignaturePolicy != nil {
+				ctx = plugin.WithSignaturePolicy(ctx, opts.PluginSignaturePolicy)
+			}
+
+			// ── Auto-resolve official auth handlers for direct CLI commands ──
+			// The prepare pipeline handles solution-level auto-resolution, but
+			// direct CLI commands (auth login, auth status, auth token) bypass
+			// the prepare pipeline. This fetches any missing official auth
+			// handlers so they are available for auth/serve/mcp commands.
+			// Skipped for unrelated commands (version, cache, plugins, etc.)
+			// to avoid unnecessary network round-trips to the plugin catalog.
+			if !cfg.Settings.DisableOfficialAuthHandlers && commandNeedsAuthHandlers(cCmd) {
+				var cooldownDuration time.Duration
+				if cfg.Plugins.FetchCooldown != "" {
+					if d, parseErr := time.ParseDuration(cfg.Plugins.FetchCooldown); parseErr == nil {
+						cooldownDuration = d
+					} else {
+						lgr.V(1).Info("invalid plugins.fetchCooldown duration, using default", "value", cfg.Plugins.FetchCooldown, "error", parseErr)
+					}
+				}
+				cooldown := plugin.NewFetchCooldown(settings.PluginCacheDirFor(binaryName), cooldownDuration)
+				pluginCfg := &plugin.ProviderConfig{
+					Quiet:      cliParams.IsQuiet,
+					NoColor:    cliParams.NoColor,
+					BinaryName: binaryName,
+				}
+				hostDeps := plugin.HostDepsFromAuthRegistry(authRegistry)
+				if hostDeps != nil && secretErr == nil {
+					hostDeps.SecretStore = sharedSecretStore
+				}
+				clientOpts := []plugin.ClientOption{plugin.WithHostDeps(hostDeps)}
+				officialAuthClients, resolveErr := solprepare.ResolveOfficialAuthHandlers(ctx, authRegistry, cooldown, pluginCfg, clientOpts...)
+				if resolveErr != nil {
+					lgr.V(1).Info("auto-resolve official auth handlers failed", "error", resolveErr)
+				}
+				authPluginClients = append(authPluginClients, officialAuthClients...)
+			}
 
 			// ── Wire official provider registry for auto-resolution ──
 			// When the embedder provides a custom registry, use it.
@@ -689,6 +691,7 @@ func Root(opts *RootOptions) *cobra.Command {
 	cCmd.AddCommand(withGroup(groupConfig, secretscmd.CommandSecrets(cliParams, ioStreams, binaryName)))
 	cCmd.AddCommand(withGroup(groupConfig, authcmd.CommandAuth(cliParams, ioStreams, binaryName)))
 	cCmd.AddCommand(withGroup(groupConfig, cachecmd.CommandCache(cliParams, ioStreams, binaryName)))
+	cCmd.AddCommand(withGroup(groupConfig, statecmd.CommandState(cliParams, ioStreams, binaryName)))
 	cCmd.AddCommand(withGroup(groupConfig, credhelpercmd.CommandCredentialHelper(cliParams, ioStreams, binaryName)))
 
 	// Plugin Commands
@@ -709,4 +712,18 @@ func Root(opts *RootOptions) *cobra.Command {
 func withGroup(group string, cmd *cobra.Command) *cobra.Command {
 	cmd.GroupID = group
 	return cmd
+}
+
+// commandNeedsAuthHandlers reports whether the invoked command requires auth
+// handler plugins to be available. Commands that directly use the auth
+// registry need auto-resolution. Solution-running commands (run, render)
+// handle resolution through the prepare pipeline and are excluded.
+func commandNeedsAuthHandlers(cmd *cobra.Command) bool {
+	for c := cmd; c != nil; c = c.Parent() {
+		switch c.Name() {
+		case "auth", "serve", "mcp", "catalog", "authhandler":
+			return true
+		}
+	}
+	return false
 }

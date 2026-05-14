@@ -17,6 +17,7 @@ import (
 	"github.com/oakwood-commons/scafctl/pkg/provider/builtin/httpprovider"
 	"github.com/oakwood-commons/scafctl/pkg/provider/builtin/messageprovider"
 	"github.com/oakwood-commons/scafctl/pkg/provider/builtin/parameterprovider"
+	"github.com/oakwood-commons/scafctl/pkg/provider/builtin/stateprovider"
 	"github.com/oakwood-commons/scafctl/pkg/provider/builtin/staticprovider"
 	"github.com/oakwood-commons/scafctl/pkg/provider/builtin/validationprovider"
 )
@@ -50,6 +51,7 @@ func registerAllToRegistry(ctx context.Context, reg *provider.Registry) error {
 		debugprovider.NewDebugProvider(),
 		gotmplprovider.NewGoTemplateProvider(),
 		messageprovider.NewMessageProvider(),
+		stateprovider.New(),
 		staticprovider.New(),
 		parameterprovider.NewParameterProvider(),
 	}
@@ -85,6 +87,7 @@ func ProviderNames() []string {
 		"debug",
 		"go-template",
 		"message",
+		"state",
 		"static",
 		"parameter",
 	}

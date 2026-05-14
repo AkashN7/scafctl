@@ -33,6 +33,7 @@ import (
 	"github.com/oakwood-commons/scafctl/pkg/solution/get"
 	"github.com/oakwood-commons/scafctl/pkg/solution/prepare"
 	"github.com/oakwood-commons/scafctl/pkg/solution/soltesting"
+	"github.com/oakwood-commons/scafctl/pkg/state"
 	"github.com/oakwood-commons/scafctl/pkg/terminal"
 	"github.com/oakwood-commons/scafctl/pkg/terminal/kvx"
 	"github.com/oakwood-commons/scafctl/pkg/terminal/output"
@@ -598,12 +599,12 @@ func (o *sharedResolverOptions) prepareSolutionForExecution(ctx context.Context)
 	if o.ShowMetrics && o.IOStreams != nil {
 		opts = append(opts, prepare.WithMetrics(o.IOStreams.ErrOut))
 	}
-	if o.CliParams != nil {
-		opts = append(opts, prepare.WithPluginConfig(&plugin.ProviderConfig{
-			Quiet:      o.CliParams.IsQuiet,
-			NoColor:    o.CliParams.NoColor,
-			BinaryName: o.CliParams.BinaryName,
-		}))
+	opts = o.appendClientPluginOptions(opts)
+
+	// Wire auth host deps so that plugin providers can request auth tokens
+	// from the host process via gRPC HostService.
+	if authOpts := plugin.AuthClientOptsFromContext(ctx); len(authOpts) > 0 {
+		opts = append(opts, prepare.WithClientOptions(authOpts...))
 	}
 
 	if o.discoveryMode != settings.DiscoveryModeDefault {
@@ -712,6 +713,23 @@ func (o *sharedResolverOptions) prepareSolutionForExecution(ctx context.Context)
 	return result.Solution, result.Registry, result.SolutionDir, result.Cleanup, nil
 }
 
+func (o *sharedResolverOptions) appendClientPluginOptions(opts []prepare.Option) []prepare.Option {
+	if o.CliParams == nil {
+		return opts
+	}
+
+	opts = append(opts, prepare.WithPluginConfig(&plugin.ProviderConfig{
+		Quiet:      o.CliParams.IsQuiet,
+		NoColor:    o.CliParams.NoColor,
+		BinaryName: o.CliParams.BinaryName,
+	}))
+	if logger.IsDebugLevel(o.CliParams.MinLogLevel) {
+		opts = append(opts, prepare.WithClientOptions(plugin.WithDebugLogging()))
+	}
+
+	return opts
+}
+
 // resolveVersionConstraintForFile resolves a --version constraint against the
 // catalog and updates o.File to include the best matching version. This must be
 // called before prepareSolutionForExecution when VersionConstraint is non-empty.
@@ -781,7 +799,7 @@ func (o *sharedResolverOptions) resolveVersionConstraintForFile(ctx context.Cont
 // addSharedResolverFlags adds common resolver flags to a cobra command.
 func addSharedResolverFlags(cCmd *cobra.Command, o *sharedResolverOptions) {
 	cCmd.Flags().StringVarP(&o.File, "file", "f", "", "Solution file path or catalog name (auto-discovered if not provided, use '-' for stdin)")
-	cCmd.Flags().StringArrayVarP(&o.ResolverParams, "resolver", "r", nil, "Resolver parameters (key=value, key=@- for raw stdin, @file.yaml, or @- for stdin)")
+	cCmd.Flags().StringArrayVarP(&o.ResolverParams, "resolver", "r", nil, "Resolver parameters (key=value, key=@- for raw stdin, @file.yaml, or @- for stdin). Available as __params in state backend expressions")
 	flags.AddKvxOutputFlagsToStruct(cCmd, &o.KvxOutputFlags)
 
 	cCmd.Flags().BoolVar(&o.ResolveAll, "resolve-all", false, "Execute all resolvers regardless of action requirements")
@@ -851,6 +869,29 @@ func solutionMetaFromSolution(sol *solution.Solution) *provider.SolutionMeta {
 		Description: sol.Metadata.Description,
 		Category:    sol.Metadata.Category,
 		Tags:        sol.Metadata.Tags,
+	}
+	if sol.Metadata.Version != nil {
+		meta.Version = sol.Metadata.Version.String()
+	}
+	return meta
+}
+
+// buildCommandInfo creates a state.CommandInfo from parsed parameters and subcommand.
+func buildCommandInfo(subcommand string, params map[string]any) state.CommandInfo {
+	paramStrs := make(map[string]string, len(params))
+	for k, v := range params {
+		paramStrs[k] = fmt.Sprintf("%v", v)
+	}
+	return state.CommandInfo{
+		Subcommand: subcommand,
+		Parameters: paramStrs,
+	}
+}
+
+// buildStateSolutionMeta creates a state.SolutionMeta from a solution.
+func buildStateSolutionMeta(sol *solution.Solution) state.SolutionMeta {
+	meta := state.SolutionMeta{
+		Name: sol.Metadata.Name,
 	}
 	if sol.Metadata.Version != nil {
 		meta.Version = sol.Metadata.Version.String()
@@ -971,7 +1012,8 @@ func autoResolveProviderByName(ctx context.Context, name string, reg *provider.R
 	pluginCfg := &plugin.ProviderConfig{
 		BinaryName: settings.BinaryNameFromContext(ctx),
 	}
-	clients, err := plugin.RegisterFetchedPlugins(ctx, reg, results, pluginCfg)
+	clientOpts := plugin.AuthClientOptsFromContext(ctx)
+	clients, err := plugin.RegisterFetchedPlugins(ctx, reg, results, pluginCfg, clientOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("registering provider %q: %w", name, err)
 	}

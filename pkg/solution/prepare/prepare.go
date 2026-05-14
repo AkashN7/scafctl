@@ -19,6 +19,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/oakwood-commons/scafctl/pkg/auth"
+	authofficial "github.com/oakwood-commons/scafctl/pkg/auth/official"
 	"github.com/oakwood-commons/scafctl/pkg/cache"
 	"github.com/oakwood-commons/scafctl/pkg/catalog"
 	"github.com/oakwood-commons/scafctl/pkg/config"
@@ -39,20 +40,21 @@ import (
 type Option func(*prepareConfig)
 
 type prepareConfig struct {
-	getter            get.Interface
-	registry          *provider.Registry
-	authRegistry      *auth.Registry
-	stdin             io.Reader
-	showMetrics       bool
-	metricsOut        io.Writer
-	pluginFetcher     *plugin.Fetcher
-	lockPlugins       []bundler.LockPlugin
-	noCache           bool
-	pluginCfg         *plugin.ProviderConfig
-	clientOpts        []plugin.ClientOption
-	discoveryMode     settings.DiscoveryMode
-	officialProviders *official.Registry
-	strict            bool
+	getter               get.Interface
+	registry             *provider.Registry
+	authRegistry         *auth.Registry
+	stdin                io.Reader
+	showMetrics          bool
+	metricsOut           io.Writer
+	pluginFetcher        *plugin.Fetcher
+	lockPlugins          []bundler.LockPlugin
+	noCache              bool
+	pluginCfg            *plugin.ProviderConfig
+	clientOpts           []plugin.ClientOption
+	discoveryMode        settings.DiscoveryMode
+	officialProviders    *official.Registry
+	officialAuthHandlers *authofficial.Registry
+	strict               bool
 }
 
 // WithGetter provides a custom solution getter. If not set, one is created
@@ -151,6 +153,17 @@ func WithDiscoveryMode(mode settings.DiscoveryMode) Option {
 func WithOfficialProviders(r *official.Registry) Option {
 	return func(c *prepareConfig) {
 		c.officialProviders = r
+	}
+}
+
+// WithOfficialAuthHandlers provides an official auth handler registry for
+// auto-resolving missing auth handlers at runtime. When set (and strict is
+// false), auth handlers referenced by the identity provider that are not in
+// the auth registry are checked against the official list and auto-fetched
+// via the plugin fetcher.
+func WithOfficialAuthHandlers(r *authofficial.Registry) Option {
+	return func(c *prepareConfig) {
+		c.officialAuthHandlers = r
 	}
 }
 
@@ -401,6 +414,23 @@ func Solution(ctx context.Context, path string, opts ...Option) (*Result, error)
 		}
 	}
 
+	// Auto-resolve official auth handlers that are referenced in the solution
+	// (via identity provider) but not already in the auth registry.
+	officialAuthClients, officialAuthErr := autoResolveOfficialAuthHandlers(ctx, sol, cfg.authRegistry, cfg)
+	if officialAuthErr != nil {
+		cleanup()
+		return nil, officialAuthErr
+	}
+	if len(officialAuthClients) > 0 {
+		origCleanup := cleanup
+		cleanup = func() {
+			for _, c := range officialAuthClients {
+				c.Kill()
+			}
+			origCleanup()
+		}
+	}
+
 	// Register the solution provider
 	if !reg.Has(solutionprovider.ProviderName) {
 		solOpts := []solutionprovider.Option{
@@ -450,6 +480,12 @@ func NewDefaultGetter(ctx context.Context, noCache bool) get.Interface {
 	if lgr != nil {
 		getterOpts = append(getterOpts, get.WithLogger(*lgr))
 
+		// Create shared artifact cache for both catalog and remote resolvers.
+		var artifactCache catalog.ArtifactCacher
+		if !noCache {
+			artifactCache = cache.NewArtifactCache(paths.ArtifactCacheDir(), settings.DefaultArtifactCacheTTL)
+		}
+
 		localCatalog, err := catalog.NewLocalCatalog(*lgr)
 		if err == nil {
 			// Build SolutionResolverOptions with optional artifact cache
@@ -457,8 +493,7 @@ func NewDefaultGetter(ctx context.Context, noCache bool) get.Interface {
 				catalog.WithResolverNoCache(noCache),
 				catalog.WithResolverRemoteCatalogs(catalog.RemoteCatalogsFromContext(ctx, *lgr)),
 			}
-			if !noCache {
-				artifactCache := cache.NewArtifactCache(paths.ArtifactCacheDir(), settings.DefaultArtifactCacheTTL)
+			if artifactCache != nil {
 				resolverOpts = append(resolverOpts, catalog.WithResolverArtifactCache(artifactCache))
 			}
 			catResolver := catalog.NewSolutionResolver(localCatalog, *lgr, resolverOpts...)
@@ -523,7 +558,9 @@ func NewDefaultGetter(ctx context.Context, noCache bool) get.Interface {
 				}
 				return ""
 			},
-			Logger: *lgr,
+			Logger:        *lgr,
+			ArtifactCache: artifactCache,
+			NoCache:       noCache,
 		})
 		getterOpts = append(getterOpts, get.WithRemoteResolver(remoteResolver))
 	}
@@ -729,6 +766,114 @@ func missingOfficialProviders(
 	return missing
 }
 
+// autoResolveOfficialAuthHandlers scans the solution's resolvers for auth
+// handler references (via the identity provider) that are not already
+// registered. For each missing handler found in the official auth handler
+// registry, a synthetic PluginDependency is created and fetched.
+//
+// When strict is true, this function returns an error listing the missing
+// official auth handlers instead of auto-fetching them.
+//
+// Returns the auth handler plugin clients that were created (caller must add
+// to cleanup) or nil when no auth handlers were auto-resolved.
+func autoResolveOfficialAuthHandlers(
+	ctx context.Context,
+	sol *solution.Solution,
+	authReg *auth.Registry,
+	cfg *prepareConfig,
+) ([]*plugin.AuthHandlerClient, error) {
+	// Default to the registry from context if not explicitly provided via option.
+	officialReg := cfg.officialAuthHandlers
+	if officialReg == nil {
+		officialReg = authofficial.RegistryFromContext(ctx)
+	}
+	if officialReg == nil || officialReg.Len() == 0 {
+		return nil, nil
+	}
+
+	lgr := logger.FromContext(ctx)
+
+	// Collect auth handler names referenced in the solution's resolvers.
+	missing := missingOfficialAuthHandlers(sol, authReg, officialReg)
+	if len(missing) == 0 {
+		return nil, nil
+	}
+
+	// In strict mode, refuse to auto-resolve and return an actionable error.
+	if cfg.strict {
+		entries := make([]string, len(missing))
+		for i, h := range missing {
+			if h.CatalogRef != h.Name {
+				entries[i] = fmt.Sprintf("%s (catalogRef: %s)", h.Name, h.CatalogRef)
+			} else {
+				entries[i] = h.Name
+			}
+		}
+		return nil, fmt.Errorf(
+			"strict mode: auth handlers %v are official but not declared in bundle.plugins; "+
+				"add their catalog references explicitly or disable strict mode",
+			entries,
+		)
+	}
+
+	if cfg.pluginFetcher == nil {
+		if lgr != nil {
+			lgr.V(1).Info("official auth handlers need auto-resolution but no plugin fetcher available")
+		}
+		return nil, nil
+	}
+
+	// Build synthetic plugin dependencies for each missing official auth handler.
+	deps := make([]solution.PluginDependency, len(missing))
+	for i, h := range missing {
+		deps[i] = h.ToPluginDependency()
+	}
+
+	if lgr != nil {
+		names := make([]string, len(missing))
+		for i, h := range missing {
+			names[i] = h.Name
+		}
+		lgr.V(0).Info("auto-resolving official auth handlers", "handlers", names)
+	}
+
+	fetchResults, fetchErr := cfg.pluginFetcher.FetchPlugins(ctx, deps, cfg.lockPlugins)
+	if fetchErr != nil {
+		return nil, fmt.Errorf("auto-fetching official auth handlers: %w", fetchErr)
+	}
+
+	if authReg == nil {
+		return nil, nil
+	}
+
+	authClients, regErr := plugin.RegisterFetchedAuthHandlerPlugins(ctx, authReg, fetchResults, cfg.pluginCfg, cfg.clientOpts...)
+	if regErr != nil {
+		return nil, fmt.Errorf("registering auto-resolved official auth handlers: %w", regErr)
+	}
+
+	return authClients, nil
+}
+
+// missingOfficialAuthHandlers returns the subset of official auth handlers
+// that are referenced by solution resolvers (via identity provider) but not
+// present in the auth registry.
+func missingOfficialAuthHandlers(
+	sol *solution.Solution,
+	authReg *auth.Registry,
+	officialReg *authofficial.Registry,
+) []authofficial.AuthHandler {
+	var missing []authofficial.AuthHandler
+	for _, name := range sol.Spec.ReferencedAuthHandlerNames() {
+		if authReg != nil && authReg.Has(name) {
+			continue
+		}
+		if h, ok := officialReg.Get(name); ok {
+			missing = append(missing, h)
+		}
+	}
+	return missing
+}
+
 // BuildPluginFetcher creates a plugin.Fetcher from the context's config and
 // auth registry. Returns an error when the catalog chain cannot be built.
 // Callers should treat errors as non-fatal: plugin auto-fetch is simply disabled.
@@ -746,6 +891,9 @@ type PluginFetcherOverrides struct {
 	Platform string
 	// NoCache bypasses the local cache when true.
 	NoCache bool
+	// SignaturePolicy overrides the signature verification policy derived
+	// from config. When non-nil, takes precedence over config values.
+	SignaturePolicy *plugin.SignaturePolicy
 }
 
 // BuildPluginFetcherWithConfig creates a plugin.Fetcher from the context's
@@ -772,6 +920,16 @@ func BuildPluginFetcherWithConfig(ctx context.Context, override PluginFetcherOve
 		BinaryName:      settings.BinaryNameFromContext(ctx),
 		Logger:          fetcherLogger,
 		AllowedCatalogs: override.AllowedCatalogs,
+		SignaturePolicy: override.SignaturePolicy,
+	}
+	if cfg.SignaturePolicy == nil {
+		cfg.SignaturePolicy = plugin.SignaturePolicyFromContext(ctx)
+	}
+	if cfg.SignaturePolicy == nil {
+		cfg.SignaturePolicy = signaturePolicyFromConfig(appCfg, fetcherLogger)
+	}
+	if err := cfg.SignaturePolicy.Validate(); err != nil {
+		return nil, fmt.Errorf("plugin signature policy: %w", err)
 	}
 	if override.Platform != "" {
 		cfg.Platform = override.Platform
@@ -782,12 +940,29 @@ func BuildPluginFetcherWithConfig(ctx context.Context, override PluginFetcherOve
 	return plugin.NewFetcher(cfg), nil
 }
 
+// signaturePolicyFromConfig converts the app configuration's plugin signature
+// settings into a SignaturePolicy using the shared plugin.SignaturePolicyFromRaw
+// helper. Returns nil when the config is nil, mode is "off", empty, or invalid.
+func signaturePolicyFromConfig(appCfg *config.Config, lgr logr.Logger) *plugin.SignaturePolicy {
+	if appCfg == nil {
+		return nil
+	}
+	sigCfg := appCfg.Plugins.Signatures
+	policy, err := plugin.SignaturePolicyFromRaw(sigCfg.Mode, sigCfg.TrustedIssuers, sigCfg.TrustedIdentities)
+	if err != nil {
+		lgr.Info("invalid plugin signature mode in config, defaulting to off",
+			"mode", sigCfg.Mode, "error", err)
+		return nil
+	}
+	return policy
+}
+
 // ResolveOfficialProviders fetches any official providers referenced by the
 // solution that are missing from the registry. It reads the official provider
 // registry from context and builds a plugin fetcher on demand.
 // Returns the plugin clients created (caller must defer Kill on each), or nil
 // when no providers needed resolution or fetching failed non-fatally.
-func ResolveOfficialProviders(ctx context.Context, sol *solution.Solution, reg *provider.Registry) ([]*plugin.Client, error) {
+func ResolveOfficialProviders(ctx context.Context, sol *solution.Solution, reg *provider.Registry, clientOpts ...plugin.ClientOption) ([]*plugin.Client, error) {
 	officialReg := official.RegistryFromContext(ctx)
 	if officialReg == nil || officialReg.Len() == 0 {
 		return nil, nil
@@ -819,11 +994,100 @@ func ResolveOfficialProviders(ctx context.Context, sol *solution.Solution, reg *
 	if err != nil {
 		return nil, fmt.Errorf("auto-fetching official providers: %w", err)
 	}
-	clients, err := plugin.RegisterFetchedPlugins(ctx, reg, results, nil)
+	clients, err := plugin.RegisterFetchedPlugins(ctx, reg, results, nil, clientOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("registering auto-resolved official providers: %w", err)
 	}
 	return clients, nil
+}
+
+// ResolveOfficialAuthHandlers fetches all official auth handlers that are not
+// already registered in the auth registry. Unlike the solution-level
+// autoResolveOfficialAuthHandlers (which only resolves handlers referenced in a
+// solution), this function resolves ALL missing official handlers to support
+// direct CLI commands like "scafctl auth login github".
+//
+// It reads the official auth handler registry and auth registry from context,
+// builds a plugin fetcher on demand, and uses the provided FetchCooldown to
+// skip recently-failed fetches.
+//
+// Returns the auth handler plugin clients created (caller must defer Kill on
+// each), or nil when no handlers needed resolution or fetching was not possible.
+func ResolveOfficialAuthHandlers(
+	ctx context.Context,
+	authReg *auth.Registry,
+	cooldown *plugin.FetchCooldown,
+	pluginCfg *plugin.ProviderConfig,
+	clientOpts ...plugin.ClientOption,
+) ([]*plugin.AuthHandlerClient, error) {
+	officialReg := authofficial.RegistryFromContext(ctx)
+	if officialReg == nil || officialReg.Len() == 0 {
+		return nil, nil
+	}
+	if authReg == nil {
+		return nil, nil
+	}
+
+	// Collect handlers that are official but not yet registered.
+	var missing []authofficial.AuthHandler
+	for _, name := range officialReg.Names() {
+		if authReg.Has(name) {
+			continue
+		}
+		h, _ := officialReg.Get(name)
+		if cooldown != nil && cooldown.OnCooldown(name) {
+			continue
+		}
+		missing = append(missing, h)
+	}
+	if len(missing) == 0 {
+		return nil, nil
+	}
+
+	lgr := logger.FromContext(ctx)
+	fetcher, err := BuildPluginFetcher(ctx)
+	if err != nil {
+		if lgr != nil {
+			lgr.V(1).Info("plugin fetcher not available for official auth handler auto-resolution", "error", err)
+		}
+		return nil, nil
+	}
+
+	deps := make([]solution.PluginDependency, len(missing))
+	for i, h := range missing {
+		deps[i] = h.ToPluginDependency()
+	}
+	if lgr != nil {
+		names := make([]string, len(missing))
+		for i, h := range missing {
+			names[i] = h.Name
+		}
+		lgr.V(0).Info("auto-resolving official auth handlers", "handlers", names)
+	}
+
+	results, fetchErr := fetcher.FetchPlugins(ctx, deps, nil)
+	if fetchErr != nil {
+		// Record cooldown for all missing handlers on fetch failure.
+		if cooldown != nil {
+			for _, h := range missing {
+				_ = cooldown.RecordFailure(h.Name)
+			}
+		}
+		if lgr != nil {
+			lgr.V(0).Info("auto-fetch of official auth handlers failed", "error", fetchErr)
+		}
+		return nil, nil // Best-effort -- don't fail CLI on fetch errors.
+	}
+
+	authClients, regErr := plugin.RegisterFetchedAuthHandlerPlugins(ctx, authReg, results, pluginCfg, clientOpts...)
+	if regErr != nil {
+		if lgr != nil {
+			lgr.V(0).Info("registering auto-resolved official auth handlers failed", "error", regErr)
+		}
+		return nil, nil
+	}
+
+	return authClients, nil
 }
 
 // injectHostMetadataSettings populates cfg.Settings["metadata"] with host runtime
@@ -853,6 +1117,7 @@ func injectHostMetadataSettings(cfg *plugin.ProviderConfig, sol *solution.Soluti
 		Description string   `json:"description"`
 		Category    string   `json:"category"`
 		Tags        []string `json:"tags"`
+		Source      string   `json:"source,omitempty"`
 	}
 
 	solMeta := solutionMeta{}
@@ -862,6 +1127,7 @@ func injectHostMetadataSettings(cfg *plugin.ProviderConfig, sol *solution.Soluti
 		solMeta.Description = sol.Metadata.Description
 		solMeta.Category = sol.Metadata.Category
 		solMeta.Tags = sol.Metadata.Tags
+		solMeta.Source = sol.Metadata.Source
 		if sol.Metadata.Version != nil {
 			solMeta.Version = sol.Metadata.Version.String()
 		}
