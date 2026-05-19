@@ -90,6 +90,8 @@ func SaveHashes(data *state.Data, actionName, sourcesHash, generatesHash, inputs
 			Type:      "string",
 			UpdatedAt: time.Now().UTC(),
 		}
+	} else {
+		delete(data.Values, generatesKey(actionName))
 	}
 
 	if inputsHash != "" {
@@ -98,5 +100,7 @@ func SaveHashes(data *state.Data, actionName, sourcesHash, generatesHash, inputs
 			Type:      "string",
 			UpdatedAt: time.Now().UTC(),
 		}
+	} else {
+		delete(data.Values, inputsKey(actionName))
 	}
 }

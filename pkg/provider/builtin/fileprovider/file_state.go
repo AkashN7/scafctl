@@ -36,6 +36,13 @@ func (p *FileProvider) executeStateLoad(absPath string) (*provider.Output, error
 		return nil, fmt.Errorf("state load: unmarshal: %w", err)
 	}
 
+	if stateData.Values == nil {
+		stateData.Values = make(map[string]*state.Entry)
+	}
+	if stateData.Command.Parameters == nil {
+		stateData.Command.Parameters = make(map[string]string)
+	}
+
 	return &provider.Output{
 		Data: map[string]any{
 			"success": true,

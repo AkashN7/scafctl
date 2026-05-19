@@ -56,6 +56,22 @@ func TestLoadFromFile_InvalidJSON(t *testing.T) {
 	assert.Contains(t, err.Error(), "unmarshal")
 }
 
+func TestLoadFromFile_NilMapsNormalized(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "minimal.json")
+	// State file with null values and no command.parameters
+	content := `{"schemaVersion":1,"metadata":{},"command":{},"values":null}`
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	loaded, err := LoadFromFile(path)
+	require.NoError(t, err)
+	assert.NotNil(t, loaded.Values)
+	assert.NotNil(t, loaded.Command.Parameters)
+	// Should be safe to assign into
+	loaded.Values["key"] = &Entry{Value: "test"}
+	loaded.Command.Parameters["p"] = "v"
+}
+
 func TestSaveToFile_CreatesDirectory(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "subdir", "nested", "state.json")

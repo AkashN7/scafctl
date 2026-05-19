@@ -97,6 +97,21 @@ func TestSaveHashes(t *testing.T) {
 			SaveHashes(nil, "build", "hash", "hash", "hash")
 		})
 	})
+
+	t.Run("clears generates and inputs when new hashes are empty", func(t *testing.T) {
+		t.Parallel()
+		data := state.NewData()
+		// Seed with all three hashes
+		SaveHashes(data, "build", "src-hash", "gen-hash", "inp-hash")
+		assert.Equal(t, "gen-hash", LoadGeneratesHash(data, "build"))
+		assert.Equal(t, "inp-hash", LoadInputsHash(data, "build"))
+
+		// Save again with empty generates and inputs -- should clear old entries
+		SaveHashes(data, "build", "new-src", "", "")
+		assert.Equal(t, "new-src", LoadSourcesHash(data, "build"))
+		assert.Empty(t, LoadGeneratesHash(data, "build"))
+		assert.Empty(t, LoadInputsHash(data, "build"))
+	})
 }
 
 func TestLoadInputsHash(t *testing.T) {

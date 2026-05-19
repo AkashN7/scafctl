@@ -179,6 +179,26 @@ func TestExecute_Write_ImmutableEntry(t *testing.T) {
 	assert.Equal(t, "locked", stateData.Values["locked_key"].Value)
 }
 
+func TestExecute_Write_ImmutableEntry_IdempotentSameValue(t *testing.T) {
+	stateData := state.NewMockData("test-sol", "1.0.0", map[string]*state.Entry{
+		"locked_key": {Value: "locked", Type: "string", Immutable: true},
+	})
+	ctx := state.WithState(context.Background(), stateData)
+
+	p := New()
+	out, err := p.Execute(ctx, map[string]any{
+		"key":   "locked_key",
+		"value": "locked",
+	})
+
+	require.NoError(t, err)
+	dataMap, ok := out.Data.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, true, dataMap["success"])
+	// Value remains unchanged
+	assert.Equal(t, "locked", stateData.Values["locked_key"].Value)
+}
+
 func TestExecute_Write_NoStateInContext(t *testing.T) {
 	p := New()
 	_, err := p.Execute(context.Background(), map[string]any{

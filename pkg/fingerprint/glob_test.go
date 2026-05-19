@@ -87,6 +87,15 @@ func TestExpandGlobs(t *testing.T) {
 			patterns: []string{"foo/../../etc/passwd"},
 			wantErr:  ErrPatternInvalid,
 		},
+		{
+			name: "filename starting with double dots is allowed",
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+				testWriteFile(t, dir, "..config", "data")
+			},
+			patterns: []string{"..config"},
+			want:     []string{"..config"},
+		},
 	}
 
 	for _, tt := range tests {

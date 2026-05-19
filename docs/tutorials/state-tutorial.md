@@ -15,90 +15,47 @@ This tutorial walks you through using state persistence to retain resolver value
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Enabling State](#enabling-state)
-3. [Saving Resolver Values](#saving-resolver-values)
-4. [Reading from State](#reading-from-state)
-5. [First Run vs Subsequent Runs](#first-run-vs-subsequent-runs)
-6. [Dynamic State Paths](#dynamic-state-paths)
-7. [GitHub Backend](#github-backend)
-8. [CLI Commands](#cli-commands)
-9. [Sensitive Values](#sensitive-values)
-10. [Common Patterns](#common-patterns)
+1. [Your First Stateful Solution](#your-first-stateful-solution)
+2. [Reading from State on Subsequent Runs](#reading-from-state-on-subsequent-runs)
+3. [Dynamic State Paths](#dynamic-state-paths)
+4. [CLI Commands](#cli-commands)
+5. [Sensitive Values](#sensitive-values)
+6. [Common Patterns](#common-patterns)
 
 ---
 
-## Overview
+## Your First Stateful Solution
 
-State adds optional, per-solution persistence of resolver values. It enables two workflows:
+Let's create a solution that saves resolver values to a local state file so they persist between runs.
 
-- **Re-run with same data** -- Retain resolved values between runs without re-prompting.
-- **Validation replay** -- Replay the exact command with the same flags and verify results.
+### Step 1: Create the Solution File
 
-State is opt-in. Solutions without a `state` block behave as they always have -- stateless and self-contained.
+Create a file called `state-demo.yaml`:
 
-### How It Works
-
-1. Before resolvers run, state is loaded from the configured backend (e.g., local file).
-2. The `state` provider can read previously saved values during resolver execution.
-3. After resolvers complete, values marked with `saveToState: true` are persisted.
-
----
-
-## Enabling State
-
-Add a top-level `state` block to your solution:
-
-~~~yaml
+```yaml
 apiVersion: scafctl.io/v1
 kind: Solution
 metadata:
-  name: my-stateful-app
+  name: state-demo
   version: 1.0.0
+
 state:
   enabled: true
   backend:
     provider: file
     inputs:
-      path: "my-stateful-app.json"
+      path: "state-demo.json"
+
 spec:
   resolvers:
-    greeting:
+    username:
       type: string
       saveToState: true
       resolve:
         with:
           - provider: parameter
             inputs:
-              key: "greeting"
-~~~
-
-Key fields:
-
-- `state.enabled` -- Activates state. Can be a literal `true`, a CEL expression, or template. Because state is loaded before resolvers run, direct resolver references (for example, `rslvr:...`) are not currently supported here.
-- `state.backend.provider` -- The provider that handles persistence. Use `file` for local files or `github` for GitHub repos.
-- `state.backend.inputs` -- Provider-specific inputs. For `file`, only `path` is required.
-
-The `path` is relative to the XDG state directory (`~/.local/state/scafctl/` on macOS/Linux).
-
----
-
-## Saving Resolver Values
-
-Mark resolvers with `saveToState: true` to persist their values:
-
-~~~yaml
-spec:
-  resolvers:
-    api_key:
-      type: string
-      sensitive: true
-      saveToState: true
-      resolve:
-        with:
-          - provider: parameter
-            inputs:
-              key: "API Key"
+              key: "username"
 
     region:
       type: string
@@ -107,69 +64,67 @@ spec:
         with:
           - provider: parameter
             inputs:
-              key: "AWS Region"
+              key: "region"
               default: "us-east-1"
-~~~
+```
 
-All `saveToState` values are collected after all resolvers complete, then flushed to the backend in a single save call. This ensures no partial state on failures.
+### Step 2: Run the Solution
 
----
+{{< tabs "state-tutorial-cmd-1" >}}
+{{% tab "Bash" %}}
+```bash
+scafctl run resolver -f state-demo.yaml -r username=alice -r region=eu-west-1
+```
+{{% /tab %}}
+{{% tab "PowerShell" %}}
+```powershell
+scafctl run resolver -f state-demo.yaml -r username=alice -r region=eu-west-1
+```
+{{% /tab %}}
+{{< /tabs >}}
 
-## Reading from State
+Output:
 
-Use the `state` provider to read previously saved values:
+```
+username: alice
+region: eu-west-1
+```
 
-~~~yaml
-spec:
-  resolvers:
-    api_key:
-      type: string
-      saveToState: true
-      resolve:
-        with:
-          # Try reading from state first
-          - provider: state
-            inputs:
-              key: "api_key"
-              required: false
-          # Fall back to prompting the user
-          - provider: parameter
-            inputs:
-              key: "API Key"
-~~~
+The values are now saved to `~/.local/state/scafctl/state-demo.json`.
 
-The resolver fallback chain makes this work naturally:
+### Understanding the Structure
 
-1. On first run, `state` returns null (no state file exists), so the resolver falls through to `parameter`.
-2. After execution, the result is saved to state via `saveToState: true`.
-3. On subsequent runs, `state` returns the cached value and the chain stops.
+- **state.enabled** -- Activates state persistence. Can be a literal `true`, a CEL expression, or template. Because state is loaded before resolvers run, resolver references (`rslvr:...`) are not supported here.
+- **state.backend.provider** -- The provider that handles persistence. Use `file` for local files.
+- **state.backend.inputs.path** -- Where to store the state file, relative to the XDG state directory (`~/.local/state/scafctl/` on macOS/Linux).
+- **saveToState: true** -- Marks a resolver's output for persistence after execution completes.
 
-### State Provider Inputs
-
-| Input | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `key` | string | Yes | -- | State entry key (typically a resolver name) |
-| `required` | bool | No | `false` | Error when key is not found |
-| `fallback` | any | No | `null` | Value when key is not found and `required` is `false` |
+All `saveToState` values are collected after resolvers complete, then flushed to the backend in a single save call. This ensures no partial state on failures.
 
 ---
 
-## First Run vs Subsequent Runs
+## Reading from State on Subsequent Runs
 
-Here's the full flow using a concrete example. Create `state-demo.yaml`:
+Now let's add the `state` provider so values are read from state on subsequent runs instead of requiring parameters again.
 
-~~~yaml
+### Step 1: Create the Solution File
+
+Create a file called `state-fallback.yaml`:
+
+```yaml
 apiVersion: scafctl.io/v1
 kind: Solution
 metadata:
-  name: state-demo
+  name: state-fallback
   version: 1.0.0
+
 state:
   enabled: true
   backend:
     provider: file
     inputs:
-      path: "state-demo.json"
+      path: "state-fallback.json"
+
 spec:
   resolvers:
     username:
@@ -198,13 +153,28 @@ spec:
             inputs:
               key: "region"
               default: "us-east-1"
-~~~
-
-**First run:**
-
 ```
-scafctl run resolver -f state-demo.yaml -r username=alice -r region=eu-west-1
+
+The resolver fallback chain makes this work:
+
+1. On first run, `state` returns `ErrKeyNotFound` (no state file exists), so the resolver falls through to `parameter` via `onError: continue`.
+2. After execution, the result is saved to state via `saveToState: true`.
+3. On subsequent runs, `state` returns the cached value and the chain stops.
+
+### Step 2: First Run (Provide Parameters)
+
+{{< tabs "state-tutorial-cmd-2" >}}
+{{% tab "Bash" %}}
+```bash
+scafctl run resolver -f state-fallback.yaml -r username=alice -r region=eu-west-1
 ```
+{{% /tab %}}
+{{% tab "PowerShell" %}}
+```powershell
+scafctl run resolver -f state-fallback.yaml -r username=alice -r region=eu-west-1
+```
+{{% /tab %}}
+{{< /tabs >}}
 
 Output:
 
@@ -213,11 +183,20 @@ username: alice
 region: eu-west-1
 ```
 
-**Second run** (no parameters needed -- values come from state):
+### Step 3: Second Run (Values Come from State)
 
+{{< tabs "state-tutorial-cmd-3" >}}
+{{% tab "Bash" %}}
+```bash
+scafctl run resolver -f state-fallback.yaml
 ```
-scafctl run resolver -f state-demo.yaml
+{{% /tab %}}
+{{% tab "PowerShell" %}}
+```powershell
+scafctl run resolver -f state-fallback.yaml
 ```
+{{% /tab %}}
+{{< /tabs >}}
 
 Output:
 
@@ -226,32 +205,74 @@ username: alice
 region: eu-west-1
 ```
 
-Both values are now read from state. No re-prompting needed.
+Both values are read from state. No re-prompting needed.
+
+### State Provider Inputs
+
+| Input | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `key` | string | Yes | -- | State entry key (typically a resolver name) |
+| `required` | bool | No | `false` | Error when key is not found |
+| `fallback` | any | No | -- | Value when key is not found and `required` is `false` |
 
 ---
 
 ## Dynamic State Paths
 
-Use Go templates in backend inputs to create per-project state files:
+Use Go templates in backend inputs to create per-project state files.
 
-~~~yaml
+### Step 1: Create the Solution File
+
+Create a file called `state-dynamic.yaml`:
+
+```yaml
+apiVersion: scafctl.io/v1
+kind: Solution
+metadata:
+  name: state-dynamic
+  version: 1.0.0
+
 state:
   enabled: true
   backend:
     provider: file
     inputs:
       path:
-        tmpl: "deploy/{{ .__params.project_name }}.json"
+        tmpl: "deploy/{{ .__params.project }}.json"
+
 spec:
   resolvers:
-    project_name:
+    region:
       type: string
+      saveToState: true
       resolve:
         with:
+          - provider: state
+            inputs:
+              key: "region"
+              required: false
           - provider: parameter
             inputs:
-              key: "project"
-~~~
+              key: "region"
+              default: "us-east-1"
+```
+
+### Step 2: Run with Different Projects
+
+{{< tabs "state-tutorial-cmd-4" >}}
+{{% tab "Bash" %}}
+```bash
+scafctl run resolver -f state-dynamic.yaml -r project=frontend -r region=us-west-2
+scafctl run resolver -f state-dynamic.yaml -r project=backend -r region=eu-west-1
+```
+{{% /tab %}}
+{{% tab "PowerShell" %}}
+```powershell
+scafctl run resolver -f state-dynamic.yaml -r project=frontend -r region=us-west-2
+scafctl run resolver -f state-dynamic.yaml -r project=backend -r region=eu-west-1
+```
+{{% /tab %}}
+{{< /tabs >}}
 
 Each project gets its own state file:
 
@@ -262,90 +283,145 @@ Each project gets its own state file:
 
 ---
 
-## GitHub Backend
-
-> **Note:** The `github` provider is not a built-in provider. It requires an
-> external plugin to be installed and registered. See the plugin documentation
-> for setup instructions.
-
-Store state in a GitHub repository instead of the local filesystem:
-
-~~~yaml
-state:
-  enabled: true
-  backend:
-    provider: github
-    inputs:
-      owner: "my-org"
-      repo: "state-store"
-      path: "state/my-app.json"
-      branch: "main"
-~~~
-
-This commits state changes directly to the repository using the GitHub GraphQL API. Authentication is handled by the configured GitHub auth handler.
-
----
-
 ## CLI Commands
 
 The `scafctl state` command group lets you inspect and modify state files directly.
 
-### List keys
+### Step 1: List Keys
 
+{{< tabs "state-tutorial-cmd-5" >}}
+{{% tab "Bash" %}}
+```bash
+scafctl state list --path state-fallback.json
 ```
-scafctl state list --path state-demo.json
+{{% /tab %}}
+{{% tab "PowerShell" %}}
+```powershell
+scafctl state list --path state-fallback.json
 ```
+{{% /tab %}}
+{{< /tabs >}}
 
-### Get a value
+### Step 2: Get a Value
 
+{{< tabs "state-tutorial-cmd-6" >}}
+{{% tab "Bash" %}}
+```bash
+scafctl state get --path state-fallback.json --key username
 ```
-scafctl state get --path state-demo.json --key username
+{{% /tab %}}
+{{% tab "PowerShell" %}}
+```powershell
+scafctl state get --path state-fallback.json --key username
 ```
+{{% /tab %}}
+{{< /tabs >}}
 
-### Set a value manually
+### Step 3: Set a Value Manually
 
+{{< tabs "state-tutorial-cmd-7" >}}
+{{% tab "Bash" %}}
+```bash
+scafctl state set --path state-fallback.json --key username --value bob
 ```
-scafctl state set --path state-demo.json --key username --value bob
+{{% /tab %}}
+{{% tab "PowerShell" %}}
+```powershell
+scafctl state set --path state-fallback.json --key username --value bob
 ```
+{{% /tab %}}
+{{< /tabs >}}
 
-### Delete a key
+### Step 4: Delete a Key
 
+{{< tabs "state-tutorial-cmd-8" >}}
+{{% tab "Bash" %}}
+```bash
+scafctl state delete --path state-fallback.json --key username
 ```
-scafctl state delete --path state-demo.json --key username
+{{% /tab %}}
+{{% tab "PowerShell" %}}
+```powershell
+scafctl state delete --path state-fallback.json --key username
 ```
+{{% /tab %}}
+{{< /tabs >}}
 
-### Clear all values
+### Step 5: Clear All Values
 
+{{< tabs "state-tutorial-cmd-9" >}}
+{{% tab "Bash" %}}
+```bash
+scafctl state clear --path state-fallback.json
 ```
-scafctl state clear --path state-demo.json
+{{% /tab %}}
+{{% tab "PowerShell" %}}
+```powershell
+scafctl state clear --path state-fallback.json
 ```
+{{% /tab %}}
+{{< /tabs >}}
 
-`scafctl state list` and `scafctl state get` support `-o json`, `-o yaml`, and `-o quiet` output formats.
-
-The `--path` flag is relative to the XDG state directory. Use an absolute path to reference files outside the state directory.
+> [!NOTE]
+> `scafctl state list` and `scafctl state get` support `-o json`, `-o yaml`, and `-o quiet` output formats. The `--path` flag is relative to the XDG state directory. Use an absolute path to reference files outside the state directory.
 
 ---
 
 ## Sensitive Values
 
-When a resolver is marked `sensitive: true` and `saveToState: true`, the value is stored **in plaintext** in the state file. A lint warning is emitted to alert the solution author:
+When a resolver is marked `sensitive: true` and `saveToState: true`, the value is stored **in plaintext** in the state file. A lint warning is emitted to alert the solution author.
 
-~~~yaml
-resolvers:
-  api_key:
-    type: string
-    sensitive: true
-    saveToState: true
-    resolve:
-      with:
-        - provider: parameter
-          inputs:
-            key: "API Key"
-~~~
+### Step 1: Create the Solution File
 
+Create a file called `state-sensitive.yaml`:
+
+```yaml
+apiVersion: scafctl.io/v1
+kind: Solution
+metadata:
+  name: state-sensitive
+  version: 1.0.0
+
+state:
+  enabled: true
+  backend:
+    provider: file
+    inputs:
+      path: "state-sensitive.json"
+
+spec:
+  resolvers:
+    api_key:
+      type: string
+      sensitive: true
+      saveToState: true
+      resolve:
+        with:
+          - provider: state
+            inputs:
+              key: "api_key"
+              required: false
+          - provider: parameter
+            inputs:
+              key: "API Key"
 ```
-scafctl lint -f solution.yaml
+
+### Step 2: Run the Linter
+
+{{< tabs "state-tutorial-cmd-10" >}}
+{{% tab "Bash" %}}
+```bash
+scafctl lint -f state-sensitive.yaml
 ```
+{{% /tab %}}
+{{% tab "PowerShell" %}}
+```powershell
+scafctl lint -f state-sensitive.yaml
+```
+{{% /tab %}}
+{{< /tabs >}}
+
+Output:
 
 ```
 WARNING [state-sensitive-value] Sensitive resolver "api_key" with saveToState will be stored in plaintext
@@ -359,7 +435,7 @@ This is an explicit, informed decision. Encryption is not used because the valid
 
 ### Cache expensive API calls
 
-~~~yaml
+```yaml
 resolvers:
   auth_token:
     type: string
@@ -374,13 +450,13 @@ resolvers:
           inputs:
             url: "https://auth.example.com/token"
             method: POST
-~~~
+```
 
 On first run, the HTTP call fetches the token. On subsequent runs, it comes from state.
 
 ### Dynamic state activation
 
-~~~yaml
+```yaml
 state:
   enabled:
     expr: "__params.enable_state == true"
@@ -388,13 +464,13 @@ state:
     provider: file
     inputs:
       path: "my-app.json"
-~~~
+```
 
 State is only active when the `enable_state` CLI parameter is set to `true` (e.g., `-r enable_state=true`).
 
 ### Writing state from actions
 
-~~~yaml
+```yaml
 workflow:
   actions:
     - name: save-deployment-id
@@ -403,6 +479,6 @@ workflow:
         key: "deployment_id"
         value:
           rslvr: deployment_result
-~~~
+```
 
 Actions can explicitly write values to state using the `state` provider with `action` capability.

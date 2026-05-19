@@ -57,7 +57,7 @@ func ExpandGlobs(baseDir string, patterns []string) ([]string, error) {
 				return nil, fmt.Errorf("%w: match %q escapes base directory", ErrPatternInvalid, m)
 			}
 			// Ensure the match doesn't escape baseDir via ..
-			if strings.HasPrefix(rel, "..") {
+			if rel == ".." || strings.HasPrefix(rel, "../") || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 				return nil, fmt.Errorf("%w: match %q escapes base directory", ErrPatternInvalid, m)
 			}
 			if _, exists := seen[rel]; !exists {

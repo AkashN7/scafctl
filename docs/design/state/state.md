@@ -476,8 +476,8 @@ State loading happens in the command layer (`pkg/cmd/scafctl/run/common.go`) bef
 
 | Rule | Reason |
 |------|--------|
-| Resolvers referenced in `state.enabled` or `state.backend.inputs` must NOT have `saveToState: true` | Prevents circular dependency: state loading depends on these resolvers, but they would also write to state |
-| Resolvers referenced in `state.enabled` or `state.backend.inputs` must NOT use the `state` provider | Prevents circular dependency: state must be loaded before this provider can function |
+| `state.enabled` and `state.backend.inputs` must NOT contain resolver references (`rslvr:`) | State loads before resolvers run, so resolver outputs are not available |
+| `state.enabled` and `state.backend.inputs` must NOT reference the `state` provider | State must be loaded before the state provider can function -- circular dependency |
 | `state.backend.provider` must resolve to a registered provider with `CapabilityState` | Ensures the backend is valid |
 
 ### Lint Warnings

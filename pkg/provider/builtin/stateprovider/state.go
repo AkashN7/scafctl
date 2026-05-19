@@ -5,6 +5,7 @@ package stateprovider
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -150,9 +151,17 @@ func (p *StateProvider) write(ctx context.Context, key string, inputs map[string
 		return nil, fmt.Errorf("state not available in context: cannot write key %q", key)
 	}
 
-	// Check immutability of existing entry (future enforcement)
+	// Check immutability of existing entry -- allow idempotent writes of the same value.
 	if existing, exists := stateData.Values[key]; exists && existing.Immutable {
-		return nil, fmt.Errorf("state key %q: %w", key, state.ErrImmutableEntry)
+		if !valuesEqual(existing.Value, inputs["value"]) {
+			return nil, fmt.Errorf("state key %q: %w", key, state.ErrImmutableEntry)
+		}
+		// Same value -- no-op, return success without modifying the entry.
+		return &provider.Output{
+			Data: map[string]any{
+				"success": true,
+			},
+		}, nil
 	}
 
 	value := inputs["value"]
@@ -171,4 +180,21 @@ func (p *StateProvider) write(ctx context.Context, key string, inputs map[string
 			"success": true,
 		},
 	}, nil
+}
+
+// valuesEqual compares two state values for equality using JSON serialization
+// to handle type-agnostic comparison (e.g., float64 vs int from JSON round-trips).
+func valuesEqual(a, b any) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	aj, aerr := json.Marshal(a)
+	bj, berr := json.Marshal(b)
+	if aerr != nil || berr != nil {
+		return fmt.Sprintf("%v", a) == fmt.Sprintf("%v", b)
+	}
+	return string(aj) == string(bj)
 }
