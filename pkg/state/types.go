@@ -111,8 +111,9 @@ type Entry struct {
 	// UpdatedAt is when this entry was last written.
 	UpdatedAt time.Time `json:"updatedAt" doc:"When this entry was last written"`
 
-	// Immutable indicates whether this entry is locked permanently (future enhancement).
-	Immutable bool `json:"immutable" doc:"Locked permanently (future enhancement)"`
+	// Immutable indicates whether this entry is locked permanently. Once set, the
+	// value cannot be overwritten by subsequent runs.
+	Immutable bool `json:"immutable" doc:"Locked permanently after first write"`
 }
 
 // NewData returns an initialized empty StateData with the current schema version.

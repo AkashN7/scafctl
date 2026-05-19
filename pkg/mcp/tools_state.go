@@ -273,8 +273,15 @@ func (s *Server) handleStateSet(_ context.Context, request mcp.CallToolRequest) 
 	}
 
 	typ := request.GetString("type", "string")
+	coerced, coerceErr := coerceStateValue(value, typ)
+	if coerceErr != nil {
+		return newStructuredError(ErrCodeInvalidInput, coerceErr.Error(),
+			WithField("type"),
+			WithSuggestion(fmt.Sprintf("Provide a valid %s value", typ)),
+		), nil
+	}
 	sd.Values[key] = &state.Entry{
-		Value:     coerceStateValue(value, typ),
+		Value:     coerced,
 		Type:      typ,
 		UpdatedAt: time.Now().UTC(),
 	}
@@ -290,20 +297,27 @@ func (s *Server) handleStateSet(_ context.Context, request mcp.CallToolRequest) 
 }
 
 // coerceStateValue converts a string value to the appropriate Go type.
-func coerceStateValue(raw, typ string) any {
+// Returns an error if the value cannot be parsed as the requested type.
+func coerceStateValue(raw, typ string) (any, error) {
 	switch typ {
 	case "int":
-		if v, err := strconv.ParseInt(raw, 10, 64); err == nil {
-			return v
+		v, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("cannot parse %q as int: %w", raw, err)
 		}
+		return v, nil
 	case "float":
-		if v, err := strconv.ParseFloat(raw, 64); err == nil {
-			return v
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return nil, fmt.Errorf("cannot parse %q as float: %w", raw, err)
 		}
+		return v, nil
 	case "bool":
-		if v, err := strconv.ParseBool(raw); err == nil {
-			return v
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			return nil, fmt.Errorf("cannot parse %q as bool: %w", raw, err)
 		}
+		return v, nil
 	}
-	return raw
+	return raw, nil
 }

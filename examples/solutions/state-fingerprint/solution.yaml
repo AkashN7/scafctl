@@ -87,7 +87,8 @@ spec:
     # =========================================================================
     # STATE FEATURE: Resolver with fallback chain (state -> parameter)
     # =========================================================================
-    # On first run: state returns null, falls through to parameter provider.
+    # On first run: state returns ErrKeyNotFound, falls through via onError: continue
+    # to the parameter provider.
     # On subsequent runs: state returns the cached value, chain stops early.
     # The result is saved back to state via saveToState: true.
     project_name:

@@ -352,7 +352,7 @@ var KnownRules = map[string]RuleMeta{
 		Category:    "state",
 		Description: "The state backend references a provider that is not registered or lacks CapabilityState.",
 		Why:         "State backends must implement CapabilityState. Using an unregistered or incompatible provider will fail at runtime.",
-		Fix:         "Use a registered provider with CapabilityState such as 'file' or 'github'.",
+		Fix:         "Use a registered provider with CapabilityState such as 'file' or 'http'. External providers like 'github' require an installed plugin.",
 	},
 	"state-circular-dependency": {
 		Rule:        "state-circular-dependency",

@@ -71,8 +71,8 @@ func ValidateDescriptor(desc *Descriptor) error {
 			return err
 		}
 	} else if desc.OutputSchemas == nil {
-		// Even without SDK capabilities, enforce baseline descriptor requirements
-		// that the SDK validator would normally check.
+		// Even without SDK capabilities, enforce the same baseline descriptor
+		// requirements that the SDK validator normally checks.
 		return fmt.Errorf("descriptor must define OutputSchemas")
 	}
 

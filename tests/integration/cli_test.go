@@ -8507,3 +8507,21 @@ func TestIntegration_StateSetTypedInt_Invalid(t *testing.T) {
 	assert.NotEqual(t, 0, exitCode)
 	assert.Contains(t, stderr, "cannot parse")
 }
+
+func TestIntegration_StateClear(t *testing.T) {
+	t.Parallel()
+	stateFile := filepath.Join(t.TempDir(), "test-state.json")
+
+	// Seed state with entries
+	runScafctl(t, "state", "set", "--path", stateFile, "--key", "k1", "--value", "v1")
+	runScafctl(t, "state", "set", "--path", stateFile, "--key", "k2", "--value", "v2")
+
+	// Clear
+	stdout, _, exitCode := runScafctl(t, "state", "clear", "--path", stateFile)
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, stdout, "Cleared 2 entries")
+
+	// Verify entries are gone
+	_, _, exitCode = runScafctl(t, "state", "get", "--path", stateFile, "--key", "k1")
+	assert.NotEqual(t, 0, exitCode)
+}

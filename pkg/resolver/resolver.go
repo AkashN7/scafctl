@@ -172,7 +172,9 @@ type Resolver struct {
 
 	// SaveToState marks this resolver's result for state persistence after execution.
 	// When true, the resolver's result is collected after all resolvers complete and
-	// flushed to the backend in a single save call. The resolver always executes its
+	// flushed to the backend in a single save call. For 'run solution' and 'run action',
+	// state is saved after successful action execution. For 'run resolver', state is
+	// saved immediately after resolver execution. The resolver always executes its
 	// configured provider -- saveToState does not cause implicit reads from state.
 	SaveToState bool `json:"saveToState,omitempty" yaml:"saveToState,omitempty" doc:"Persist resolver result to state after execution" example:"true"`
 

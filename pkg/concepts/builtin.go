@@ -341,9 +341,9 @@ The catalog supports versioning, visibility controls (public/private), and beta 
 2. Loaded state is available to the 'state' provider via the fallback chain pattern.
 3. After execution, resolvers with 'saveToState: true' are persisted via 'state_save'.
 
-**State provider** — used inside resolver fallback chains to read individual keys from loaded state. Returns null when the key is not found (if required: false), so the next provider in the chain takes over.
+**State provider** — used inside resolver fallback chains to read individual keys from loaded state. Returns ErrKeyNotFound when the key is not found (with required: true), so the next provider in the chain takes over via onError: continue.
 
-**Backend providers** — file (local JSON via XDG state dir), github (GitHub GraphQL API), http (remote REST API). Each implements CapabilityState with state_load, state_save, and state_delete operations.`,
+**Backend providers** — file (local JSON via XDG state dir), http (remote REST API). External providers (e.g., github) can be installed as plugins. Each implements CapabilityState with state_load, state_save, and state_delete operations.`,
 		Examples: []string{
 			"# Enable state with file backend\nstate:\n  enabled: true\n  backend:\n    provider: file\n    inputs:\n      path: \"my-app-state.json\"\n\nspec:\n  resolvers:\n    username:\n      type: string\n      saveToState: true\n      resolve:\n        with:\n          - provider: state\n            inputs:\n              key: \"username\"\n              required: false\n          - provider: parameter\n            inputs:\n              name: \"username\"",
 		},

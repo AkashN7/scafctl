@@ -59,7 +59,7 @@ func (p *StateProvider) Descriptor() *provider.Descriptor {
 			"type": schemahelper.StringProp("Resolver type for the entry (for write/action mode)",
 				schemahelper.WithExample("string"),
 				schemahelper.WithMaxLength(30)),
-			"immutable": schemahelper.BoolProp("Lock value permanently (future enhancement)",
+			"immutable": schemahelper.BoolProp("Lock value permanently after first write",
 				schemahelper.WithDefault(false)),
 		}),
 		OutputSchemas: map[provider.Capability]*jsonschema.Schema{

@@ -1085,7 +1085,7 @@ func lintStateBackend(sol *solution.Solution, result *Result, registry *provider
 	if !found {
 		result.addFinding(SeverityError, "state", location+".backend.provider",
 			fmt.Sprintf("state backend provider '%s' not found in registry", backendName),
-			"Use a registered provider with CapabilityState such as 'file', 'github', or 'http'",
+			"Use a registered provider with CapabilityState such as 'file' or 'http'. External providers like 'github' require an installed plugin",
 			"invalid-state-backend")
 	} else {
 		desc := prov.Descriptor()

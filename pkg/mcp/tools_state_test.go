@@ -308,26 +308,33 @@ func TestCoerceStateValue(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		raw  string
-		typ  string
-		want any
+		name    string
+		raw     string
+		typ     string
+		want    any
+		wantErr bool
 	}{
-		{"string default", "hello", "string", "hello"},
-		{"int valid", "42", "int", int64(42)},
-		{"int invalid falls back", "abc", "int", "abc"},
-		{"float valid", "3.14", "float", 3.14},
-		{"float invalid falls back", "xyz", "float", "xyz"},
-		{"bool true", "true", "bool", true},
-		{"bool false", "false", "bool", false},
-		{"bool invalid falls back", "maybe", "bool", "maybe"},
-		{"unknown type returns string", "val", "unknown", "val"},
+		{"string default", "hello", "string", "hello", false},
+		{"int valid", "42", "int", int64(42), false},
+		{"int invalid errors", "abc", "int", nil, true},
+		{"float valid", "3.14", "float", 3.14, false},
+		{"float invalid errors", "xyz", "float", nil, true},
+		{"bool true", "true", "bool", true, false},
+		{"bool false", "false", "bool", false, false},
+		{"bool invalid errors", "maybe", "bool", nil, true},
+		{"unknown type returns string", "val", "unknown", "val", false},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tc.want, coerceStateValue(tc.raw, tc.typ))
+			got, err := coerceStateValue(tc.raw, tc.typ)
+			if tc.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tc.want, got)
+			}
 		})
 	}
 }

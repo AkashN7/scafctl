@@ -86,7 +86,7 @@ type Action struct {
 	// Sources declares glob patterns for input files this action depends on.
 	// When provided (and state is enabled), the action is skipped if source
 	// files haven't changed and generated files haven't been externally modified
-	// since the last successful run.
+	// since the last successful run. Supported by 'run solution' and 'run action'.
 	Sources []string `json:"sources,omitempty" yaml:"sources,omitempty" doc:"Glob patterns for input file dependencies" maxItems:"100"`
 
 	// Generates declares glob patterns for output files this action produces.

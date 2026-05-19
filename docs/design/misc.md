@@ -137,7 +137,7 @@ scafctl is stateless by default:
 
 Solutions can opt into state persistence via a top-level `state` block. When configured:
 
-- Resolver values marked with `saveToState: true` are persisted to a backend (local file or GitHub)
+- Resolver values marked with `saveToState: true` are persisted to a backend (local file, or external providers via plugins)
 - The `state` provider reads previously saved values during resolver execution
 - State is loaded before resolvers run and saved after they complete
 

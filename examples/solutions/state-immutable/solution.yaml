@@ -55,9 +55,9 @@ spec:
     # =========================================================================
     # Immutable resolver -- locked after first write
     # =========================================================================
-    # On first run, the state provider returns null (no state file exists),
-    # so the fallback chain continues to the parameter provider which asks
-    # for a deployment ID. The result is saved to state with immutable: true.
+    # On first run, the state provider returns ErrKeyNotFound (no state file exists),
+    # so the fallback chain continues via onError: continue to the parameter provider
+    # which asks for a deployment ID. The result is saved to state with immutable: true.
     # On all subsequent runs, the state provider returns the locked value
     # and the chain stops. The value can never change unless you manually
     # delete the state entry.
