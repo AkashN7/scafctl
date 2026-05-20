@@ -21,6 +21,9 @@ This tutorial walks you through using state persistence to retain resolver value
 4. [CLI Commands](#cli-commands)
 5. [Sensitive Values](#sensitive-values)
 6. [Common Patterns](#common-patterns)
+7. [Command Behavior](#command-behavior)
+8. [Concerns](#concerns)
+9. [Future Enhancements](#future-enhancements)
 
 ---
 
@@ -65,7 +68,9 @@ spec:
           - provider: parameter
             inputs:
               key: "region"
-              default: "us-east-1"
+          - provider: static
+            inputs:
+              value: "us-east-1"
 ```
 
 ### Step 2: Run the Solution
@@ -152,7 +157,9 @@ spec:
           - provider: parameter
             inputs:
               key: "region"
-              default: "us-east-1"
+          - provider: static
+            inputs:
+              value: "us-east-1"
 ```
 
 The resolver fallback chain makes this work:
@@ -254,7 +261,9 @@ spec:
           - provider: parameter
             inputs:
               key: "region"
-              default: "us-east-1"
+          - provider: static
+            inputs:
+              value: "us-east-1"
 ```
 
 ### Step 2: Run with Different Projects
@@ -482,3 +491,235 @@ workflow:
 ```
 
 Actions can explicitly write values to state using the `state` provider with `action` capability.
+
+---
+
+## Command Behavior
+
+State behavior varies across the three commands that support it. Understanding these differences is important for building correct stateful solutions.
+
+### `run resolver`
+
+Loads state before resolvers execute and **saves state immediately after resolvers complete**.
+
+- State is loaded before resolver execution
+- Resolvers with `saveToState: true` have their values persisted after all resolvers succeed
+- If any resolver fails, state is NOT saved (no partial state)
+- The `command.subcommand` field in state is recorded as `"run resolver"`
+
+This is the simplest state lifecycle -- load, resolve, save.
+
+### `run solution` and `run action`
+
+Loads state before resolvers execute but **saves state only after actions complete successfully**.
+
+- State is loaded before resolver execution (same as `run resolver`)
+- Resolvers execute and produce values
+- Actions execute using resolver data
+- State is saved only after successful action execution
+- If actions fail, state is NOT saved -- even if resolvers succeeded
+- `run action` filters to specific actions (plus transitive dependencies) but follows the same state lifecycle as `run solution`
+- The `command.subcommand` field is recorded as `"run solution"` or `"run action"`
+
+This means: if you run a solution with actions and an action fails, the resolver values are not persisted to state. This is intentional -- it ensures state reflects only fully successful executions.
+
+### `render solution`
+
+Loads state (read-only) but **never saves state**.
+
+- State is loaded before resolver execution
+- The state provider can read previously cached values
+- Resolvers execute using state context
+- The action graph is rendered (not executed) using resolved values
+- State is NEVER written -- render is a read-only operation
+- The `command.subcommand` field passed to state load is `"render solution"`
+
+Use `render solution` to preview what an action graph would look like with current state values, without modifying state.
+
+### Summary Table
+
+| Command | Loads State | Saves State | Save Trigger |
+|---------|-------------|-------------|--------------|
+| `run resolver` | Yes | Yes | After resolvers complete |
+| `run solution` | Yes | Yes | After actions succeed |
+| `run action` | Yes | Yes | After actions succeed |
+| `render solution` | Yes | No (read-only) | -- |
+
+### Resolver Chain Pattern for Parameter Override
+
+When you want CLI parameters to override cached state values, place the `parameter` provider **before** the `state` provider in the resolve chain:
+
+```yaml
+resolvers:
+  environment:
+    type: string
+    saveToState: true
+    resolve:
+      with:
+        - provider: parameter      # wins if -r env=value is passed
+          inputs:
+            key: "env"
+        - provider: state           # wins on repeat runs (no param)
+          inputs:
+            key: "environment"
+            required: true
+        - provider: static          # default on first run (no state)
+          inputs:
+            value: "dev"
+```
+
+The fallback chain uses `onError: continue` (the default) so each provider that fails simply falls through to the next.
+
+---
+
+## Concerns
+
+### Replay and Validation Workflows
+
+A common pattern in scaffolding frameworks is a **validation layer** that replays a previously executed solution to verify that the generated output matches what a user committed. For example, a CI validator might:
+
+1. Read the state file from a pull request
+2. Re-run the solution using that state
+3. Verify the generated files match the PR contents
+
+This pattern works because the resolver fallback chain reads cached values from `state.values` without needing any CLI parameters. However, there are important limitations and design considerations.
+
+### The `command.parameters` Field Is Informational Only
+
+The `command` field in state (`command.subcommand` and `command.parameters`) records the most recent invocation's CLI parameters. However:
+
+- It is **never read back** by scafctl during execution -- it is purely metadata
+- It uses **last-write-wins** semantics -- only the most recent invocation is stored, with no history
+- Parameters are **string-coerced** via `fmt.Sprintf("%v", v)`, which is lossy for complex types
+- Running different commands (e.g., `run resolver` then `run action`) overwrites the record entirely
+
+This means `command.parameters` cannot be used as a reliable replay mechanism. The actual "replay" in scafctl happens through `state.values` and the resolver fallback chain.
+
+### State Completeness for Replay
+
+For replay to produce deterministic output, **every resolver whose value affects the generated files** must either:
+
+1. Be saved to state (`saveToState: true`), OR
+2. Be deterministically derivable from other saved resolvers (computed/transformed values)
+
+Resolvers that are NOT saved to state will have no value during replay unless they can resolve from a non-interactive provider (e.g., `static`, `exec`, or another deterministic source). If a resolver falls through to `parameter` and no parameter is provided, it will fail.
+
+This creates a tension: some values may be intentionally re-prompted for safety (e.g., target environment confirmation), but excluding them from state breaks deterministic replay.
+
+**Guideline**: For solutions that require validation replay, all resolvers contributing to output must be `saveToState: true`. Safety concerns (like confirming dangerous operations) should be handled through separate mechanisms -- `when` conditions on actions, lint rules, or CI policy checks -- rather than by omitting values from state.
+
+### Derived Values Are Safe to Exclude
+
+Resolvers whose values are purely computed from other resolvers do not need `saveToState: true`:
+
+```yaml
+resolvers:
+  base_url:
+    type: string
+    saveToState: true
+    resolve:
+      with:
+        - provider: state
+          inputs: { key: "base_url", required: false }
+        - provider: parameter
+          inputs: { key: "base_url" }
+
+  api_endpoint:
+    # Derived from base_url -- no need to save
+    type: string
+    resolve:
+      with:
+        - provider: static
+          inputs:
+            value:
+              rslvr: base_url
+    transform:
+      with:
+        - provider: cel
+          inputs:
+            expression: '__self + "/api/v2"'
+```
+
+On replay, `base_url` comes from state, and `api_endpoint` is recomputed identically.
+
+### Volatile Values and Replay
+
+Values that change between runs (auth tokens, timestamps, git branch) pose a challenge:
+
+- If saved to state, replay uses the stale cached value (which may be what you want for determinism)
+- If not saved, replay must obtain a fresh value (which may differ from the original run)
+
+For validation workflows, stale-but-deterministic is usually preferable to fresh-but-different.
+
+---
+
+## Future Enhancements
+
+The following are potential improvements to address the concerns above. These are not yet implemented.
+
+### Replay Command
+
+A dedicated `scafctl state replay` command that re-executes a solution using only state values, failing fast if any resolver cannot resolve without interactive input. This would formalize the validation workflow:
+
+```bash
+# Hypothetical: replay using state file, output to temp dir for diffing
+scafctl state replay -f app-registration.yaml --state-path ./state.json --output-dir /tmp/validate
+```
+
+### Parameter Accumulation in State
+
+Instead of last-write-wins for `command.parameters`, accumulate all parameters ever passed across runs. This would make the command field a more complete audit trail:
+
+```json
+{
+  "command": {
+    "subcommand": "run solution",
+    "parameters": {
+      "app_name": "my-app",
+      "admin_group": "new-admins",
+      "region": "us-east-1"
+    },
+    "parameterHistory": [
+      {"timestamp": "2026-01-15T10:00:00Z", "parameters": {"app_name": "my-app", "region": "us-east-1"}},
+      {"timestamp": "2026-03-20T14:30:00Z", "parameters": {"admin_group": "new-admins"}}
+    ]
+  }
+}
+```
+
+### State Completeness Lint Rule
+
+A lint rule that warns when a solution has `state.enabled: true` but has resolvers without `saveToState: true` that are not provably derived from other saved resolvers. This would catch replay gaps at authoring time rather than at validation time.
+
+### Explicit State File Path Override
+
+A CLI flag to point the state backend at an arbitrary file path, making it easier for validators to use a state file from a PR checkout without copying it to the XDG state directory:
+
+```bash
+# Hypothetical: override state path for validation
+scafctl run solution -f app-registration.yaml --state-file ./apps/my-app/state.json
+```
+
+### Resolver Tagging for Replay Scope
+
+A mechanism to tag resolvers as "replay-required" vs "ephemeral", allowing the replay command to distinguish between resolvers that must come from state and resolvers that are expected to be re-derived:
+
+```yaml
+resolvers:
+  admin_group:
+    saveToState: true
+    replayScope: required    # must be in state for replay to succeed
+
+  auth_token:
+    saveToState: false
+    replayScope: ephemeral   # re-derived on every run, not needed for replay
+```
+
+### Render-Based Validation Mode
+
+A `render solution` enhancement that outputs the file tree that actions *would* produce (without executing them), enabling validators to diff against PR contents without any side effects:
+
+```bash
+# Hypothetical: render file tree to directory for comparison
+scafctl render solution -f app-registration.yaml --output-dir /tmp/validate --state-file ./state.json
+```

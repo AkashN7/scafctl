@@ -8442,6 +8442,7 @@ func TestIntegration_StateHelp(t *testing.T) {
 	assert.Contains(t, stdout, "get")
 	assert.Contains(t, stdout, "set")
 	assert.Contains(t, stdout, "delete")
+	assert.Contains(t, stdout, "clear")
 }
 
 func TestIntegration_StateSetAndGet(t *testing.T) {
@@ -8524,4 +8525,126 @@ func TestIntegration_StateClear(t *testing.T) {
 	// Verify entries are gone
 	_, _, exitCode = runScafctl(t, "state", "get", "--path", stateFile, "--key", "k1")
 	assert.NotEqual(t, 0, exitCode)
+}
+
+func TestIntegration_StateSetImmutableRejectsOverwrite(t *testing.T) {
+	t.Parallel()
+	stateFile := filepath.Join(t.TempDir(), "test-state.json")
+
+	// Seed state with an immutable entry by writing the JSON directly
+	// (the CLI set command doesn't have an --immutable flag; immutability
+	// is set via solution resolvers, but we can test the guard by writing
+	// the state file directly)
+	content := `{"schemaVersion":1,"metadata":{},"command":{"subcommand":"","parameters":{}},"values":{"locked":{"value":"original","type":"string","updatedAt":"2025-01-01T00:00:00Z","immutable":true}}}`
+	require.NoError(t, os.WriteFile(stateFile, []byte(content), 0o600))
+
+	// Attempt to overwrite the immutable key
+	_, stderr, exitCode := runScafctl(t, "state", "set", "--path", stateFile, "--key", "locked", "--value", "new-value")
+	assert.NotEqual(t, 0, exitCode)
+	assert.Contains(t, stderr, "immutable")
+
+	// Verify the original value is preserved
+	stdout, _, exitCode := runScafctl(t, "state", "get", "--path", stateFile, "--key", "locked")
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, stdout, "original")
+}
+
+func TestIntegration_StateGetJSON(t *testing.T) {
+	t.Parallel()
+	stateFile := filepath.Join(t.TempDir(), "test-state.json")
+
+	// Seed state with an immutable entry
+	content := `{"schemaVersion":1,"metadata":{},"command":{"subcommand":"","parameters":{}},"values":{"api_key":{"value":"sk-123","type":"string","updatedAt":"2025-04-01T10:00:00Z","immutable":true}}}`
+	require.NoError(t, os.WriteFile(stateFile, []byte(content), 0o600))
+
+	stdout, _, exitCode := runScafctl(t, "state", "get", "--path", stateFile, "--key", "api_key", "-o", "json")
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, stdout, "sk-123")
+	assert.Contains(t, stdout, "immutable")
+	assert.Contains(t, stdout, "true")
+}
+
+func TestIntegration_StateListJSON(t *testing.T) {
+	t.Parallel()
+	stateFile := filepath.Join(t.TempDir(), "test-state.json")
+
+	// Seed with multiple keys
+	runScafctl(t, "state", "set", "--path", stateFile, "--key", "alpha", "--value", "a")
+	runScafctl(t, "state", "set", "--path", stateFile, "--key", "beta", "--value", "b")
+
+	stdout, _, exitCode := runScafctl(t, "state", "list", "--path", stateFile, "-o", "json")
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, stdout, "alpha")
+	assert.Contains(t, stdout, "beta")
+	// JSON output should be parseable
+	assert.Contains(t, stdout, "{")
+}
+
+func TestIntegration_StateDeleteNonexistentKey(t *testing.T) {
+	t.Parallel()
+	stateFile := filepath.Join(t.TempDir(), "test-state.json")
+
+	// Seed with one key
+	runScafctl(t, "state", "set", "--path", stateFile, "--key", "exists", "--value", "val")
+
+	// Delete a key that doesn't exist
+	_, stderr, exitCode := runScafctl(t, "state", "delete", "--path", stateFile, "--key", "ghost")
+	assert.NotEqual(t, 0, exitCode)
+	assert.Contains(t, stderr, "not found")
+}
+
+func TestIntegration_StateSetTypedBool(t *testing.T) {
+	t.Parallel()
+	stateFile := filepath.Join(t.TempDir(), "test-state.json")
+
+	_, _, exitCode := runScafctl(t, "state", "set", "--path", stateFile, "--key", "debug", "--value", "true", "--type", "bool")
+	assert.Equal(t, 0, exitCode)
+
+	stdout, _, exitCode := runScafctl(t, "state", "get", "--path", stateFile, "--key", "debug", "-o", "json")
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, stdout, "true")
+}
+
+func TestIntegration_StateSetTypedFloat(t *testing.T) {
+	t.Parallel()
+	stateFile := filepath.Join(t.TempDir(), "test-state.json")
+
+	_, _, exitCode := runScafctl(t, "state", "set", "--path", stateFile, "--key", "ratio", "--value", "3.14", "--type", "float")
+	assert.Equal(t, 0, exitCode)
+
+	stdout, _, exitCode := runScafctl(t, "state", "get", "--path", stateFile, "--key", "ratio", "-o", "json")
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, stdout, "3.14")
+}
+
+func TestIntegration_StateSetTypedBool_Invalid(t *testing.T) {
+	t.Parallel()
+	stateFile := filepath.Join(t.TempDir(), "test-state.json")
+
+	_, stderr, exitCode := runScafctl(t, "state", "set", "--path", stateFile, "--key", "debug", "--value", "maybe", "--type", "bool")
+	assert.NotEqual(t, 0, exitCode)
+	assert.Contains(t, stderr, "cannot parse")
+}
+
+func TestIntegration_StateClearPreservesMetadata(t *testing.T) {
+	t.Parallel()
+	stateFile := filepath.Join(t.TempDir(), "test-state.json")
+
+	// Seed state with metadata and values
+	content := `{"schemaVersion":1,"metadata":{"solution":"my-sol","version":"2.0.0","createdAt":"2025-01-01T00:00:00Z","lastUpdatedAt":"2025-03-01T00:00:00Z","scafctlVersion":"1.0.0"},"command":{"subcommand":"run solution","parameters":{"env":"prod"}},"values":{"k1":{"value":"v1","type":"string","updatedAt":"2025-01-01T00:00:00Z","immutable":false},"k2":{"value":"v2","type":"string","updatedAt":"2025-01-01T00:00:00Z","immutable":false}}}`
+	require.NoError(t, os.WriteFile(stateFile, []byte(content), 0o600))
+
+	// Clear
+	stdout, _, exitCode := runScafctl(t, "state", "clear", "--path", stateFile)
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, stdout, "Cleared 2 entries")
+
+	// Read the file directly and verify metadata is preserved
+	data, err := os.ReadFile(stateFile)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "my-sol")
+	assert.Contains(t, string(data), "2.0.0")
+	// But values should be empty
+	assert.NotContains(t, string(data), "k1")
+	assert.NotContains(t, string(data), "k2")
 }

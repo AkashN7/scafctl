@@ -1,0 +1,153 @@
+apiVersion: scafctl.io/v1
+kind: Solution
+
+metadata:
+  name: test-state-dynamic-enabled
+  version: 1.0.0
+  description: |
+    Functional tests for dynamic state enabled field.
+    Verifies that the enabled ValueRef evaluates __params correctly to
+    enable or disable state persistence based on CLI parameters.
+
+state:
+  enabled:
+    expr: "has(__params.use_state) && __params.use_state == 'true'"
+  backend:
+    provider: file
+    inputs:
+      path: state.json
+
+spec:
+  resolvers:
+    greeting:
+      description: A greeting resolved from static, saved to state when enabled
+      type: string
+      saveToState: true
+      resolve:
+        with:
+          - provider: static
+            inputs:
+              value: hello-dynamic
+
+    from_state:
+      description: Read a value from state with fallback
+      type: string
+      resolve:
+        with:
+          - provider: state
+            onError: continue
+            inputs:
+              key: "greeting"
+              required: true
+          - provider: static
+            inputs:
+              value: "no-state-fallback"
+
+  testing:
+    config:
+      # resolve-defaults: resolvers depend on state context
+      # render-defaults: solution has no workflow.actions section
+      skipBuiltins: [resolve-defaults, render-defaults]
+
+    cases:
+      # =====================================================================
+      # State disabled when param is missing or false
+      # =====================================================================
+      state-disabled-no-param:
+        description: State is disabled when use_state param is not provided
+        command: [run, resolver]
+        args: ["-o", "json"]
+        tags: [state, dynamic-enabled]
+        env:
+          XDG_STATE_HOME: /tmp/scafctl-it-state-dyn-disabled
+        init:
+          - command: "rm -rf /tmp/scafctl-it-state-dyn-disabled && mkdir -p /tmp/scafctl-it-state-dyn-disabled/scafctl"
+        cleanup:
+          - command: "rm -rf /tmp/scafctl-it-state-dyn-disabled"
+        assertions:
+          - expression: __exitCode == 0
+          - expression: __output.greeting == "hello-dynamic"
+            message: "Static resolver should produce value"
+          - expression: __output.from_state == "no-state-fallback"
+            message: "State disabled so state provider should miss and fall through"
+
+      state-disabled-false-param:
+        description: State is disabled when use_state param is false
+        command: [run, resolver]
+        args: ["-o", "json", "-r", "use_state=false"]
+        tags: [state, dynamic-enabled]
+        env:
+          XDG_STATE_HOME: /tmp/scafctl-it-state-dyn-false
+        init:
+          - command: "rm -rf /tmp/scafctl-it-state-dyn-false && mkdir -p /tmp/scafctl-it-state-dyn-false/scafctl"
+        cleanup:
+          - command: "rm -rf /tmp/scafctl-it-state-dyn-false"
+        assertions:
+          - expression: __exitCode == 0
+          - expression: __output.from_state == "no-state-fallback"
+            message: "State disabled so state provider should miss and fall through"
+
+      # =====================================================================
+      # State enabled when param is true
+      # =====================================================================
+      state-enabled-with-param:
+        description: State is enabled when use_state param is true
+        command: [run, resolver]
+        args: ["-o", "json", "-r", "use_state=true"]
+        tags: [state, dynamic-enabled, smoke]
+        env:
+          XDG_STATE_HOME: /tmp/scafctl-it-state-dyn-enabled
+        init:
+          - command: "rm -rf /tmp/scafctl-it-state-dyn-enabled && mkdir -p /tmp/scafctl-it-state-dyn-enabled/scafctl"
+        cleanup:
+          - command: "rm -rf /tmp/scafctl-it-state-dyn-enabled"
+        assertions:
+          - expression: __exitCode == 0
+          - expression: __output.greeting == "hello-dynamic"
+            message: "Greeting resolver should produce static value"
+          - expression: __output.from_state == "no-state-fallback"
+            message: "First run with empty state should fall through to fallback"
+
+      # =====================================================================
+      # Pre-seeded state is accessible when enabled
+      # =====================================================================
+      state-enabled-preseeded:
+        description: Pre-seeded state is accessible when state is enabled
+        command: [run, resolver]
+        args: ["-o", "json", "-r", "use_state=true"]
+        tags: [state, dynamic-enabled]
+        env:
+          XDG_STATE_HOME: /tmp/scafctl-it-state-dyn-preseeded
+        init:
+          - command: "rm -rf /tmp/scafctl-it-state-dyn-preseeded && mkdir -p /tmp/scafctl-it-state-dyn-preseeded/scafctl"
+          - command: >-
+              printf '{"schemaVersion":1,"metadata":{"solution":"test-state-dynamic-enabled","version":"1.0.0","createdAt":"2025-01-01T00:00:00Z","lastUpdatedAt":"2025-01-01T00:00:00Z","scafctlVersion":"dev"},"command":{"subcommand":"run resolver","parameters":{}},"values":{"greeting":{"value":"persisted-greeting","type":"string","updatedAt":"2025-01-01T00:00:00Z","immutable":false}}}'
+              > /tmp/scafctl-it-state-dyn-preseeded/scafctl/state.json
+        cleanup:
+          - command: "rm -rf /tmp/scafctl-it-state-dyn-preseeded"
+        assertions:
+          - expression: __exitCode == 0
+          - expression: __output.from_state == "persisted-greeting"
+            message: "State provider should read pre-seeded value when state is enabled"
+
+      # =====================================================================
+      # Pre-seeded state is NOT accessible when disabled
+      # =====================================================================
+      state-disabled-ignores-preseeded:
+        description: Pre-seeded state is ignored when state is disabled
+        command: [run, resolver]
+        args: ["-o", "json", "-r", "use_state=false"]
+        tags: [state, dynamic-enabled]
+        env:
+          XDG_STATE_HOME: /tmp/scafctl-it-state-dyn-ignored
+        init:
+          - command: "rm -rf /tmp/scafctl-it-state-dyn-ignored && mkdir -p /tmp/scafctl-it-state-dyn-ignored/scafctl"
+          - command: >-
+              printf '{"schemaVersion":1,"metadata":{"solution":"test-state-dynamic-enabled","version":"1.0.0","createdAt":"2025-01-01T00:00:00Z","lastUpdatedAt":"2025-01-01T00:00:00Z","scafctlVersion":"dev"},"command":{"subcommand":"run resolver","parameters":{}},"values":{"greeting":{"value":"persisted-greeting","type":"string","updatedAt":"2025-01-01T00:00:00Z","immutable":false}}}'
+              > /tmp/scafctl-it-state-dyn-ignored/scafctl/state.json
+        cleanup:
+          - command: "rm -rf /tmp/scafctl-it-state-dyn-ignored"
+        assertions:
+          - expression: __exitCode == 0
+          - expression: __output.from_state == "no-state-fallback"
+            message: "State disabled so pre-seeded state should be ignored"
