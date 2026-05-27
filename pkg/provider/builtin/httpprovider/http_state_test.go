@@ -26,9 +26,7 @@ func TestHTTPProvider_StateCapability(t *testing.T) {
 
 func TestHTTPProvider_StateLoad_Success(t *testing.T) {
 	sd := state.NewData()
-	sd.Values = map[string]*state.Entry{
-		"greeting": {Value: "hello"},
-	}
+	sd.Parameters["greeting"] = "hello"
 	body, err := json.Marshal(sd)
 	require.NoError(t, err)
 
@@ -54,7 +52,7 @@ func TestHTTPProvider_StateLoad_Success(t *testing.T) {
 	assert.True(t, data["success"].(bool))
 	loaded, ok := data["data"].(*state.Data)
 	require.True(t, ok)
-	assert.Equal(t, "hello", loaded.Values["greeting"].Value)
+	assert.Equal(t, "hello", loaded.Parameters["greeting"])
 }
 
 func TestHTTPProvider_StateLoad_NotFound(t *testing.T) {
@@ -130,9 +128,7 @@ func TestHTTPProvider_StateSave_Success(t *testing.T) {
 	defer server.Close()
 
 	sd := state.NewData()
-	sd.Values = map[string]*state.Entry{
-		"key": {Value: "value"},
-	}
+	sd.Parameters["key"] = "value"
 
 	p := NewHTTPProvider()
 	ctx := testContext(t)
@@ -152,7 +148,7 @@ func TestHTTPProvider_StateSave_Success(t *testing.T) {
 
 	var saved state.Data
 	require.NoError(t, json.Unmarshal(receivedBody, &saved))
-	assert.Equal(t, "value", saved.Values["key"].Value)
+	assert.Equal(t, "value", saved.Parameters["key"])
 }
 
 func TestHTTPProvider_StateSave_MissingData(t *testing.T) {
@@ -363,9 +359,7 @@ func TestHTTPProvider_StateRoundTrip(t *testing.T) {
 
 	// Save
 	sd := state.NewData()
-	sd.Values = map[string]*state.Entry{
-		"env": {Value: "production"},
-	}
+	sd.Parameters["env"] = "production"
 	saveResult, err := p.Execute(ctx, map[string]any{
 		"operation": "state_save",
 		"url":       server.URL,
@@ -381,7 +375,7 @@ func TestHTTPProvider_StateRoundTrip(t *testing.T) {
 	})
 	require.NoError(t, err)
 	loaded := loadResult2.Data.(map[string]any)["data"].(*state.Data)
-	assert.Equal(t, "production", loaded.Values["env"].Value)
+	assert.Equal(t, "production", loaded.Parameters["env"])
 
 	// Delete
 	delResult, err := p.Execute(ctx, map[string]any{
@@ -427,7 +421,7 @@ func TestHTTPProvider_StateWhatIf(t *testing.T) {
 
 func BenchmarkHTTPProvider_StateLoad(b *testing.B) {
 	sd := state.NewData()
-	sd.Values = map[string]*state.Entry{"x": {Value: "y"}}
+	sd.Parameters["x"] = "y"
 	body, _ := json.Marshal(sd)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -458,7 +452,7 @@ func BenchmarkHTTPProvider_StateSave(b *testing.B) {
 	p := NewHTTPProvider()
 	ctx := testContext(b)
 	sd := state.NewData()
-	sd.Values = map[string]*state.Entry{"x": {Value: "y"}}
+	sd.Parameters["x"] = "y"
 
 	b.ResetTimer()
 	for b.Loop() {

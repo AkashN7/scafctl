@@ -28,43 +28,40 @@ func inputsKey(actionName string) string {
 // LoadSourcesHash retrieves the previously stored sources hash from state.
 // Returns empty string if not found.
 func LoadSourcesHash(data *state.Data, actionName string) string {
-	if data == nil || data.Values == nil {
+	if data == nil || data.Fingerprints == nil {
 		return ""
 	}
-	entry, ok := data.Values[sourcesKey(actionName)]
+	entry, ok := data.Fingerprints[sourcesKey(actionName)]
 	if !ok || entry == nil {
 		return ""
 	}
-	s, _ := entry.Value.(string)
-	return s
+	return entry.Value
 }
 
 // LoadGeneratesHash retrieves the previously stored generates hash from state.
 // Returns empty string if not found.
 func LoadGeneratesHash(data *state.Data, actionName string) string {
-	if data == nil || data.Values == nil {
+	if data == nil || data.Fingerprints == nil {
 		return ""
 	}
-	entry, ok := data.Values[generatesKey(actionName)]
+	entry, ok := data.Fingerprints[generatesKey(actionName)]
 	if !ok || entry == nil {
 		return ""
 	}
-	s, _ := entry.Value.(string)
-	return s
+	return entry.Value
 }
 
 // LoadInputsHash retrieves the previously stored inputs hash from state.
 // Returns empty string if not found.
 func LoadInputsHash(data *state.Data, actionName string) string {
-	if data == nil || data.Values == nil {
+	if data == nil || data.Fingerprints == nil {
 		return ""
 	}
-	entry, ok := data.Values[inputsKey(actionName)]
+	entry, ok := data.Fingerprints[inputsKey(actionName)]
 	if !ok || entry == nil {
 		return ""
 	}
-	s, _ := entry.Value.(string)
-	return s
+	return entry.Value
 }
 
 // SaveHashes stores the current fingerprint hashes into state data.
@@ -74,33 +71,32 @@ func SaveHashes(data *state.Data, actionName, sourcesHash, generatesHash, inputs
 	if data == nil {
 		return
 	}
-	if data.Values == nil {
-		data.Values = make(map[string]*state.Entry)
+	if data.Fingerprints == nil {
+		data.Fingerprints = make(map[string]*state.FingerprintEntry)
 	}
 
-	data.Values[sourcesKey(actionName)] = &state.Entry{
+	now := time.Now().UTC()
+
+	data.Fingerprints[sourcesKey(actionName)] = &state.FingerprintEntry{
 		Value:     sourcesHash,
-		Type:      "string",
-		UpdatedAt: time.Now().UTC(),
+		UpdatedAt: now,
 	}
 
 	if generatesHash != "" {
-		data.Values[generatesKey(actionName)] = &state.Entry{
+		data.Fingerprints[generatesKey(actionName)] = &state.FingerprintEntry{
 			Value:     generatesHash,
-			Type:      "string",
-			UpdatedAt: time.Now().UTC(),
+			UpdatedAt: now,
 		}
 	} else {
-		delete(data.Values, generatesKey(actionName))
+		delete(data.Fingerprints, generatesKey(actionName))
 	}
 
 	if inputsHash != "" {
-		data.Values[inputsKey(actionName)] = &state.Entry{
+		data.Fingerprints[inputsKey(actionName)] = &state.FingerprintEntry{
 			Value:     inputsHash,
-			Type:      "string",
-			UpdatedAt: time.Now().UTC(),
+			UpdatedAt: now,
 		}
 	} else {
-		delete(data.Values, inputsKey(actionName))
+		delete(data.Fingerprints, inputsKey(actionName))
 	}
 }

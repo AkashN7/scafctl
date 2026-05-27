@@ -5,6 +5,7 @@ package state
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/oakwood-commons/scafctl/pkg/cmd/flags"
 	"github.com/oakwood-commons/scafctl/pkg/exitcode"
@@ -32,12 +33,24 @@ func CommandGet(cliParams *settings.Run, ioStreams *terminal.IOStreams, _ string
 	cmd := &cobra.Command{
 		Use:   "get",
 		Short: "Get a state value",
-		Long:  "Retrieve and display the value of a specific state key.",
+		Long:  "Retrieve and display the value of a specific state key from parameters or immutables.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			w := writer.FromContext(ctx)
 			if w == nil {
 				return fmt.Errorf("writer not initialized in context")
+			}
+
+			// Resolve and verify the file exists before loading.
+			resolved, err := state.ResolveStatePath(opts.Path)
+			if err != nil {
+				w.Errorf("%v", err)
+				return exitcode.WithCode(err, exitcode.InvalidInput)
+			}
+			if _, statErr := os.Stat(resolved); os.IsNotExist(statErr) {
+				err := fmt.Errorf("state file not found: %s", resolved)
+				w.Errorf("%v", err)
+				return exitcode.WithCode(err, exitcode.FileNotFound)
 			}
 
 			sd, err := state.LoadFromFile(opts.Path)
@@ -47,29 +60,36 @@ func CommandGet(cliParams *settings.Run, ioStreams *terminal.IOStreams, _ string
 				return exitcode.WithCode(err, exitcode.GeneralError)
 			}
 
-			entry, ok := sd.Values[opts.Key]
-			if !ok {
-				err := fmt.Errorf("key %q not found in state", opts.Key)
-				w.Errorf("%v", err)
-				return exitcode.WithCode(err, exitcode.FileNotFound)
-			}
-
 			kvxOpts := flags.ToKvxOutputOptions(&opts.KvxOutputFlags, kvx.WithIOStreams(ioStreams))
 
-			updatedAt := ""
-			if !entry.UpdatedAt.IsZero() {
-				updatedAt = entry.UpdatedAt.Format("2006-01-02T15:04:05Z")
+			// Check parameters first, then immutables
+			if val, ok := sd.Parameters[opts.Key]; ok {
+				data := []map[string]any{{
+					"key":     opts.Key,
+					"value":   val,
+					"section": "parameters",
+				}}
+				return kvxOpts.Write(data)
 			}
 
-			data := []map[string]any{{
-				"key":       opts.Key,
-				"value":     entry.Value,
-				"type":      entry.Type,
-				"updatedAt": updatedAt,
-				"immutable": entry.Immutable,
-			}}
+			if entry, ok := sd.Immutables[opts.Key]; ok {
+				createdAt := ""
+				if !entry.CreatedAt.IsZero() {
+					createdAt = entry.CreatedAt.Format("2006-01-02T15:04:05Z")
+				}
+				data := []map[string]any{{
+					"key":       opts.Key,
+					"value":     entry.Value,
+					"type":      entry.Type,
+					"section":   "immutables",
+					"createdAt": createdAt,
+				}}
+				return kvxOpts.Write(data)
+			}
 
-			return kvxOpts.Write(data)
+			err = fmt.Errorf("key %q not found in state", opts.Key)
+			w.Errorf("%v", err)
+			return exitcode.WithCode(err, exitcode.FileNotFound)
 		},
 	}
 

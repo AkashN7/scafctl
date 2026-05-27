@@ -468,6 +468,7 @@ func (o *ResolverOptions) Run(ctx context.Context) error {
 		if !loadResult.Skipped {
 			ctx = loadResult.Ctx
 			stateData = loadResult.Data
+			params = loadResult.MergedParams
 		}
 	}
 
@@ -487,8 +488,8 @@ func (o *ResolverOptions) Run(ctx context.Context) error {
 
 	elapsed := time.Since(start)
 
-	// State lifecycle: save resolver values marked with saveToState after
-	// successful resolver execution.
+	// State lifecycle: save merged parameters and check immutable values
+	// after successful resolver execution.
 	if stateMgr != nil && stateData != nil {
 		solMeta := buildStateSolutionMeta(sol)
 		if saveErr := stateMgr.Save(ctx, stateData, resolverCtx, resolvers, params, resolverData, solMeta); saveErr != nil {

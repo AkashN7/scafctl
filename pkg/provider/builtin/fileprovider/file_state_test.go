@@ -40,9 +40,7 @@ func TestFileProvider_StateRoundTrip(t *testing.T) {
 	absPath := filepath.Join(tmpDir, "state.json")
 
 	stateData := state.NewData()
-	stateData.Values = map[string]*state.Entry{
-		"greeting": {Value: "hello"},
-	}
+	stateData.Parameters["greeting"] = "hello"
 
 	// Save
 	saveResult, err := p.executeStateSave(absPath, map[string]any{"data": stateData})
@@ -61,7 +59,7 @@ func TestFileProvider_StateRoundTrip(t *testing.T) {
 
 	loaded, ok := loadMap["data"].(*state.Data)
 	require.True(t, ok)
-	assert.Equal(t, "hello", loaded.Values["greeting"].Value)
+	assert.Equal(t, "hello", loaded.Parameters["greeting"])
 
 	// Delete
 	delResult, err := p.executeStateDelete(absPath)
@@ -182,9 +180,7 @@ func BenchmarkFileProvider_StateLoad(b *testing.B) {
 	tmpDir := b.TempDir()
 
 	sd := state.NewData()
-	sd.Values = map[string]*state.Entry{
-		"x": {Value: "y"},
-	}
+	sd.Parameters["x"] = "y"
 	data, _ := json.MarshalIndent(sd, "", "  ")
 	statePath := filepath.Join(tmpDir, "bench.json")
 	require.NoError(b, os.WriteFile(statePath, data, 0o600))
@@ -200,9 +196,7 @@ func BenchmarkFileProvider_StateSave(b *testing.B) {
 	tmpDir := b.TempDir()
 
 	sd := state.NewData()
-	sd.Values = map[string]*state.Entry{
-		"x": {Value: "y"},
-	}
+	sd.Parameters["x"] = "y"
 	absPath := filepath.Join(tmpDir, "bench.json")
 
 	b.ResetTimer()

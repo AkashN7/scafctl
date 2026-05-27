@@ -8531,11 +8531,8 @@ func TestIntegration_StateSetImmutableRejectsOverwrite(t *testing.T) {
 	t.Parallel()
 	stateFile := filepath.Join(t.TempDir(), "test-state.json")
 
-	// Seed state with an immutable entry by writing the JSON directly
-	// (the CLI set command doesn't have an --immutable flag; immutability
-	// is set via solution resolvers, but we can test the guard by writing
-	// the state file directly)
-	content := `{"schemaVersion":1,"metadata":{},"command":{"subcommand":"","parameters":{}},"values":{"locked":{"value":"original","type":"string","updatedAt":"2025-01-01T00:00:00Z","immutable":true}}}`
+	// Seed state with an immutable entry using the new schema
+	content := `{"schemaVersion":1,"metadata":{},"command":{"subcommand":"","parameters":{}},"parameters":{},"immutables":{"locked":{"value":"original","type":"string","createdAt":"2025-01-01T00:00:00Z"}},"fingerprints":{}}`
 	require.NoError(t, os.WriteFile(stateFile, []byte(content), 0o600))
 
 	// Attempt to overwrite the immutable key
@@ -8553,15 +8550,15 @@ func TestIntegration_StateGetJSON(t *testing.T) {
 	t.Parallel()
 	stateFile := filepath.Join(t.TempDir(), "test-state.json")
 
-	// Seed state with an immutable entry
-	content := `{"schemaVersion":1,"metadata":{},"command":{"subcommand":"","parameters":{}},"values":{"api_key":{"value":"sk-123","type":"string","updatedAt":"2025-04-01T10:00:00Z","immutable":true}}}`
+	// Seed state with an immutable entry using the new schema
+	content := `{"schemaVersion":1,"metadata":{},"command":{"subcommand":"","parameters":{}},"parameters":{},"immutables":{"api_key":{"value":"sk-123","type":"string","createdAt":"2025-04-01T10:00:00Z"}},"fingerprints":{}}`
 	require.NoError(t, os.WriteFile(stateFile, []byte(content), 0o600))
 
 	stdout, _, exitCode := runScafctl(t, "state", "get", "--path", stateFile, "--key", "api_key", "-o", "json")
 	assert.Equal(t, 0, exitCode)
 	assert.Contains(t, stdout, "sk-123")
-	assert.Contains(t, stdout, "immutable")
-	assert.Contains(t, stdout, "true")
+	assert.Contains(t, stdout, "immutables")
+	assert.Contains(t, stdout, "string")
 }
 
 func TestIntegration_StateListJSON(t *testing.T) {
@@ -8630,8 +8627,8 @@ func TestIntegration_StateClearPreservesMetadata(t *testing.T) {
 	t.Parallel()
 	stateFile := filepath.Join(t.TempDir(), "test-state.json")
 
-	// Seed state with metadata and values
-	content := `{"schemaVersion":1,"metadata":{"solution":"my-sol","version":"2.0.0","createdAt":"2025-01-01T00:00:00Z","lastUpdatedAt":"2025-03-01T00:00:00Z","scafctlVersion":"1.0.0"},"command":{"subcommand":"run solution","parameters":{"env":"prod"}},"values":{"k1":{"value":"v1","type":"string","updatedAt":"2025-01-01T00:00:00Z","immutable":false},"k2":{"value":"v2","type":"string","updatedAt":"2025-01-01T00:00:00Z","immutable":false}}}`
+	// Seed state with metadata and parameters
+	content := `{"schemaVersion":1,"metadata":{"solution":"my-sol","version":"2.0.0","createdAt":"2025-01-01T00:00:00Z","lastUpdatedAt":"2025-03-01T00:00:00Z","scafctlVersion":"1.0.0"},"command":{"subcommand":"run solution","parameters":{"env":"prod"}},"parameters":{"k1":"v1","k2":"v2"},"immutables":{},"fingerprints":{}}`
 	require.NoError(t, os.WriteFile(stateFile, []byte(content), 0o600))
 
 	// Clear
@@ -8644,7 +8641,7 @@ func TestIntegration_StateClearPreservesMetadata(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "my-sol")
 	assert.Contains(t, string(data), "2.0.0")
-	// But values should be empty
+	// But parameters should be empty
 	assert.NotContains(t, string(data), "k1")
 	assert.NotContains(t, string(data), "k2")
 }

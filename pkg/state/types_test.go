@@ -15,8 +15,12 @@ import (
 func TestNewStateData(t *testing.T) {
 	data := NewData()
 	assert.Equal(t, SchemaVersionCurrent, data.SchemaVersion)
-	assert.NotNil(t, data.Values)
-	assert.Empty(t, data.Values)
+	assert.NotNil(t, data.Parameters)
+	assert.Empty(t, data.Parameters)
+	assert.NotNil(t, data.Immutables)
+	assert.Empty(t, data.Immutables)
+	assert.NotNil(t, data.Fingerprints)
+	assert.Empty(t, data.Fingerprints)
 	assert.NotNil(t, data.Command.Parameters)
 	assert.Empty(t, data.Command.Parameters)
 }
@@ -39,18 +43,21 @@ func TestStateData_JSONRoundTrip(t *testing.T) {
 				"project": "foo",
 			},
 		},
-		Values: map[string]*Entry{
-			"api_key": {
-				Value:     "sk-abc123",
+		Parameters: map[string]any{
+			"env":    "prod",
+			"region": "us-east-1",
+		},
+		Immutables: map[string]*ImmutableEntry{
+			"cluster_id": {
+				Value:     "uuid-1234",
 				Type:      "string",
-				UpdatedAt: now,
-				Immutable: false,
+				CreatedAt: now,
 			},
-			"count": {
-				Value:     float64(42),
-				Type:      "int",
+		},
+		Fingerprints: map[string]*FingerprintEntry{
+			"__fingerprint:deploy:sources": {
+				Value:     "abc123",
 				UpdatedAt: now,
-				Immutable: true,
 			},
 		},
 	}
@@ -68,12 +75,14 @@ func TestStateData_JSONRoundTrip(t *testing.T) {
 	assert.Equal(t, original.Metadata.ScafctlVersion, restored.Metadata.ScafctlVersion)
 	assert.Equal(t, original.Command.Subcommand, restored.Command.Subcommand)
 	assert.Equal(t, original.Command.Parameters, restored.Command.Parameters)
-	assert.Len(t, restored.Values, 2)
-	assert.Equal(t, "sk-abc123", restored.Values["api_key"].Value)
-	assert.Equal(t, "string", restored.Values["api_key"].Type)
-	assert.False(t, restored.Values["api_key"].Immutable)
-	assert.Equal(t, float64(42), restored.Values["count"].Value)
-	assert.True(t, restored.Values["count"].Immutable)
+	assert.Len(t, restored.Parameters, 2)
+	assert.Equal(t, "prod", restored.Parameters["env"])
+	assert.Equal(t, "us-east-1", restored.Parameters["region"])
+	assert.Len(t, restored.Immutables, 1)
+	assert.Equal(t, "uuid-1234", restored.Immutables["cluster_id"].Value)
+	assert.Equal(t, "string", restored.Immutables["cluster_id"].Type)
+	assert.Len(t, restored.Fingerprints, 1)
+	assert.Equal(t, "abc123", restored.Fingerprints["__fingerprint:deploy:sources"].Value)
 }
 
 func TestStateData_EmptyJSONRoundTrip(t *testing.T) {
@@ -87,56 +96,48 @@ func TestStateData_EmptyJSONRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, SchemaVersionCurrent, restored.SchemaVersion)
-	assert.Empty(t, restored.Values)
 }
 
 func TestNewMockStateData(t *testing.T) {
-	values := map[string]*Entry{
-		"key1": {Value: "val1", Type: "string"},
+	params := map[string]any{
+		"env": "prod",
 	}
 
-	data := NewMockData("test-sol", "2.0.0", values)
+	data := NewMockData("test-sol", "2.0.0", params)
 
 	assert.Equal(t, SchemaVersionCurrent, data.SchemaVersion)
 	assert.Equal(t, "test-sol", data.Metadata.Solution)
 	assert.Equal(t, "2.0.0", data.Metadata.Version)
 	assert.Equal(t, "test", data.Metadata.ScafctlVersion)
 	assert.False(t, data.Metadata.CreatedAt.IsZero())
-	assert.Len(t, data.Values, 1)
-	assert.Equal(t, "val1", data.Values["key1"].Value)
+	assert.Len(t, data.Parameters, 1)
+	assert.Equal(t, "prod", data.Parameters["env"])
 }
 
-func TestNewMockStateData_NilValues(t *testing.T) {
+func TestNewMockStateData_NilParams(t *testing.T) {
 	data := NewMockData("test-sol", "1.0.0", nil)
 
-	assert.NotNil(t, data.Values)
-	assert.Empty(t, data.Values)
+	assert.NotNil(t, data.Parameters)
+	assert.Empty(t, data.Parameters)
 }
 
-func TestStateEntry_JSONRoundTrip(t *testing.T) {
+func TestImmutableEntry_JSONRoundTrip(t *testing.T) {
+	now := time.Now().UTC()
 	tests := []struct {
 		name  string
-		entry Entry
+		entry ImmutableEntry
 	}{
 		{
 			name:  "string value",
-			entry: Entry{Value: "hello", Type: "string", UpdatedAt: time.Now().UTC()},
+			entry: ImmutableEntry{Value: "hello", Type: "string", CreatedAt: now},
 		},
 		{
 			name:  "number value",
-			entry: Entry{Value: float64(42), Type: "int", UpdatedAt: time.Now().UTC()},
+			entry: ImmutableEntry{Value: float64(42), Type: "int", CreatedAt: now},
 		},
 		{
 			name:  "bool value",
-			entry: Entry{Value: true, Type: "bool", UpdatedAt: time.Now().UTC()},
-		},
-		{
-			name:  "array value",
-			entry: Entry{Value: []any{"a", "b"}, Type: "array", UpdatedAt: time.Now().UTC()},
-		},
-		{
-			name:  "immutable",
-			entry: Entry{Value: "locked", Type: "string", Immutable: true, UpdatedAt: time.Now().UTC()},
+			entry: ImmutableEntry{Value: true, Type: "bool", CreatedAt: now},
 		},
 	}
 
@@ -145,12 +146,11 @@ func TestStateEntry_JSONRoundTrip(t *testing.T) {
 			data, err := json.Marshal(tt.entry)
 			require.NoError(t, err)
 
-			var restored Entry
+			var restored ImmutableEntry
 			err = json.Unmarshal(data, &restored)
 			require.NoError(t, err)
 
 			assert.Equal(t, tt.entry.Type, restored.Type)
-			assert.Equal(t, tt.entry.Immutable, restored.Immutable)
 		})
 	}
 }

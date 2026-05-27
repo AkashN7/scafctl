@@ -5,6 +5,7 @@ package state
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/oakwood-commons/scafctl/pkg/exitcode"
 	"github.com/oakwood-commons/scafctl/pkg/settings"
@@ -17,14 +18,15 @@ import (
 // CommandDelete creates the 'state delete' command.
 func CommandDelete(_ *settings.Run, _ *terminal.IOStreams, _ string) *cobra.Command {
 	var (
-		path string
-		key  string
+		path  string
+		key   string
+		force bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "delete",
 		Short: "Delete a state key",
-		Long:  "Remove a specific key from a state file.",
+		Long:  "Remove a specific key from a state file (parameters or immutables).",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			w := writer.FromContext(ctx)
@@ -39,27 +41,56 @@ func CommandDelete(_ *settings.Run, _ *terminal.IOStreams, _ string) *cobra.Comm
 				return exitcode.WithCode(err, exitcode.GeneralError)
 			}
 
-			if _, ok := sd.Values[key]; !ok {
-				err := fmt.Errorf("key %q not found in state", key)
+			// Verify the file actually exists (LoadFromFile returns empty for non-existent).
+			resolved, resolveErr := state.ResolveStatePath(path)
+			if resolveErr != nil {
+				w.Errorf("%v", resolveErr)
+				return exitcode.WithCode(resolveErr, exitcode.InvalidInput)
+			}
+			if _, statErr := os.Stat(resolved); os.IsNotExist(statErr) {
+				err := fmt.Errorf("state file not found: %s", resolved)
 				w.Errorf("%v", err)
 				return exitcode.WithCode(err, exitcode.FileNotFound)
 			}
 
-			delete(sd.Values, key)
-
-			if err := state.SaveToFile(path, sd); err != nil {
-				err := fmt.Errorf("failed to save state: %w", err)
-				w.Errorf("%v", err)
-				return exitcode.WithCode(err, exitcode.GeneralError)
+			// Check parameters first
+			if _, ok := sd.Parameters[key]; ok {
+				delete(sd.Parameters, key)
+				if err := state.SaveToFile(path, sd); err != nil {
+					err := fmt.Errorf("failed to save state: %w", err)
+					w.Errorf("%v", err)
+					return exitcode.WithCode(err, exitcode.GeneralError)
+				}
+				w.Successf("Deleted parameter %q\n", key)
+				return nil
 			}
 
-			w.Successf("Deleted key %q\n", key)
-			return nil
+			// Check immutables
+			if _, ok := sd.Immutables[key]; ok {
+				if !force {
+					err := fmt.Errorf("key %q is immutable; deleting it will cause the next run to generate a new value. Use --force to confirm", key)
+					w.Errorf("%v", err)
+					return exitcode.WithCode(err, exitcode.InvalidInput)
+				}
+				delete(sd.Immutables, key)
+				if err := state.SaveToFile(path, sd); err != nil {
+					err := fmt.Errorf("failed to save state: %w", err)
+					w.Errorf("%v", err)
+					return exitcode.WithCode(err, exitcode.GeneralError)
+				}
+				w.Successf("Deleted immutable key %q\n", key)
+				return nil
+			}
+
+			err = fmt.Errorf("key %q not found in state", key)
+			w.Errorf("%v", err)
+			return exitcode.WithCode(err, exitcode.FileNotFound)
 		},
 	}
 
 	cmd.Flags().StringVar(&path, "path", "", "State file path (relative to state directory)")
 	cmd.Flags().StringVar(&key, "key", "", "Key to delete")
+	cmd.Flags().BoolVar(&force, "force", false, "Force deletion of immutable keys")
 	_ = cmd.MarkFlagRequired("path")
 	_ = cmd.MarkFlagRequired("key")
 

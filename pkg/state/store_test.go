@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,7 +19,7 @@ func TestLoadFromFile_NotFound(t *testing.T) {
 	sd, err := LoadFromFile(path)
 	require.NoError(t, err)
 	assert.Equal(t, SchemaVersionCurrent, sd.SchemaVersion)
-	assert.Empty(t, sd.Values)
+	assert.Empty(t, sd.Parameters)
 }
 
 func TestLoadFromFile_RoundTrip(t *testing.T) {
@@ -28,11 +27,7 @@ func TestLoadFromFile_RoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.json")
 
 	sd := NewData()
-	sd.Values["mykey"] = &Entry{
-		Value:     "hello",
-		Type:      "string",
-		UpdatedAt: time.Now().UTC().Truncate(time.Second),
-	}
+	sd.Parameters["env"] = "prod"
 	sd.Metadata.Solution = "test-sol"
 
 	err := SaveToFile(path, sd)
@@ -41,9 +36,8 @@ func TestLoadFromFile_RoundTrip(t *testing.T) {
 	loaded, err := LoadFromFile(path)
 	require.NoError(t, err)
 	assert.Equal(t, "test-sol", loaded.Metadata.Solution)
-	require.Contains(t, loaded.Values, "mykey")
-	assert.Equal(t, "hello", loaded.Values["mykey"].Value)
-	assert.Equal(t, "string", loaded.Values["mykey"].Type)
+	require.Contains(t, loaded.Parameters, "env")
+	assert.Equal(t, "prod", loaded.Parameters["env"])
 }
 
 func TestLoadFromFile_InvalidJSON(t *testing.T) {
@@ -59,16 +53,18 @@ func TestLoadFromFile_InvalidJSON(t *testing.T) {
 func TestLoadFromFile_NilMapsNormalized(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "minimal.json")
-	// State file with null values and no command.parameters
-	content := `{"schemaVersion":1,"metadata":{},"command":{},"values":null}`
+	// State file with null maps and no command.parameters
+	content := `{"schemaVersion":1,"metadata":{},"command":{},"parameters":null,"immutables":null,"fingerprints":null}`
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
 
 	loaded, err := LoadFromFile(path)
 	require.NoError(t, err)
-	assert.NotNil(t, loaded.Values)
+	assert.NotNil(t, loaded.Parameters)
+	assert.NotNil(t, loaded.Immutables)
+	assert.NotNil(t, loaded.Fingerprints)
 	assert.NotNil(t, loaded.Command.Parameters)
 	// Should be safe to assign into
-	loaded.Values["key"] = &Entry{Value: "test"}
+	loaded.Parameters["key"] = "test"
 	loaded.Command.Parameters["p"] = "v"
 }
 
@@ -121,10 +117,7 @@ func BenchmarkLoadFromFile(b *testing.B) {
 	path := filepath.Join(b.TempDir(), "bench.json")
 	sd := NewData()
 	for i := range 100 {
-		sd.Values[filepath.Join("key", string(rune('a'+i%26)))] = &Entry{
-			Value: "value",
-			Type:  "string",
-		}
+		sd.Parameters[filepath.Join("key", string(rune('a'+i%26)))] = "value"
 	}
 	require.NoError(b, SaveToFile(path, sd))
 
@@ -138,7 +131,7 @@ func BenchmarkLoadFromFile(b *testing.B) {
 func BenchmarkSaveToFile(b *testing.B) {
 	dir := b.TempDir()
 	sd := NewData()
-	sd.Values["key"] = &Entry{Value: "val", Type: "string"}
+	sd.Parameters["key"] = "val"
 
 	b.ReportAllocs()
 	b.ResetTimer()

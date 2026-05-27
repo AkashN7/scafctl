@@ -1219,7 +1219,7 @@ func TestExecutor_Execute_FingerprintUpToDate(t *testing.T) {
 		},
 	})
 
-	stateData := &state.Data{Values: make(map[string]*state.Entry)}
+	stateData := state.NewData()
 	fpChecker := fingerprint.NewChecker(stateData)
 
 	// First execution: should run (first run)
@@ -1274,7 +1274,7 @@ func TestExecutor_Execute_FingerprintNoCache(t *testing.T) {
 		},
 	})
 
-	stateData := &state.Data{Values: make(map[string]*state.Entry)}
+	stateData := state.NewData()
 	fpChecker := fingerprint.NewChecker(stateData)
 
 	// First run to populate state
@@ -1330,7 +1330,7 @@ func TestExecutor_Execute_FingerprintInputsChanged(t *testing.T) {
 		},
 	})
 
-	stateData := &state.Data{Values: make(map[string]*state.Entry)}
+	stateData := state.NewData()
 	fpChecker := fingerprint.NewChecker(stateData)
 
 	// First run with name=staging

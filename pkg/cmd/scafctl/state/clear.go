@@ -5,6 +5,7 @@ package state
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/oakwood-commons/scafctl/pkg/exitcode"
 	"github.com/oakwood-commons/scafctl/pkg/settings"
@@ -21,7 +22,7 @@ func CommandClear(_ *settings.Run, _ *terminal.IOStreams, _ string) *cobra.Comma
 	cmd := &cobra.Command{
 		Use:   "clear",
 		Short: "Clear all state values",
-		Long:  "Remove all stored values from a state file, preserving metadata.",
+		Long:  "Remove all stored parameters, immutables, and fingerprints from a state file, preserving metadata.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			w := writer.FromContext(ctx)
@@ -36,8 +37,22 @@ func CommandClear(_ *settings.Run, _ *terminal.IOStreams, _ string) *cobra.Comma
 				return exitcode.WithCode(err, exitcode.GeneralError)
 			}
 
-			count := len(sd.Values)
-			sd.Values = make(map[string]*state.Entry)
+			// Verify the file actually exists (LoadFromFile returns empty for non-existent).
+			resolved, resolveErr := state.ResolveStatePath(path)
+			if resolveErr != nil {
+				w.Errorf("%v", resolveErr)
+				return exitcode.WithCode(resolveErr, exitcode.InvalidInput)
+			}
+			if _, statErr := os.Stat(resolved); os.IsNotExist(statErr) {
+				err := fmt.Errorf("state file not found: %s", resolved)
+				w.Errorf("%v", err)
+				return exitcode.WithCode(err, exitcode.FileNotFound)
+			}
+
+			count := len(sd.Parameters) + len(sd.Immutables) + len(sd.Fingerprints)
+			sd.Parameters = make(map[string]any)
+			sd.Immutables = make(map[string]*state.ImmutableEntry)
+			sd.Fingerprints = make(map[string]*state.FingerprintEntry)
 
 			if err := state.SaveToFile(path, sd); err != nil {
 				err := fmt.Errorf("failed to save state: %w", err)

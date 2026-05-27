@@ -31,8 +31,8 @@ func newTestContext(t *testing.T) (context.Context, *bytes.Buffer) {
 func seedState(t *testing.T, path string) {
 	t.Helper()
 	sd := state.NewData()
-	sd.Values["env"] = &state.Entry{Value: "prod", Type: "string", UpdatedAt: time.Now().UTC()}
-	sd.Values["count"] = &state.Entry{Value: float64(42), Type: "int", UpdatedAt: time.Now().UTC()}
+	sd.Parameters["env"] = "prod"
+	sd.Parameters["count"] = float64(42)
 	require.NoError(t, state.SaveToFile(path, sd))
 }
 
@@ -60,6 +60,8 @@ func TestCommandState_HasSubcommands(t *testing.T) {
 func TestCommandList_EmptyState(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "empty.json")
+	// Create an empty state file (commands now require the file to exist).
+	require.NoError(t, state.SaveToFile(path, state.NewData()))
 	ctx, buf := newTestContext(t)
 
 	cliParams := &settings.Run{BinaryName: "testcli"}
@@ -136,7 +138,7 @@ func TestCommandGet_JSON(t *testing.T) {
 	err := cmd.Execute()
 	require.NoError(t, err)
 	assert.Contains(t, buf.String(), `"value"`)
-	assert.Contains(t, buf.String(), `"type"`)
+	assert.Contains(t, buf.String(), `"env"`)
 }
 
 // ── Set tests ─────────────────────────────────────────────────────────────────
@@ -155,15 +157,15 @@ func TestCommandSet_NewKey(t *testing.T) {
 
 	sd, loadErr := state.LoadFromFile(path)
 	require.NoError(t, loadErr)
-	require.Contains(t, sd.Values, "region")
-	assert.Equal(t, "us-east-1", sd.Values["region"].Value)
+	require.Contains(t, sd.Parameters, "region")
+	assert.Equal(t, "us-east-1", sd.Parameters["region"])
 }
 
 func TestCommandSet_Immutable(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "test.json")
 	sd := state.NewData()
-	sd.Values["locked"] = &state.Entry{Value: "v1", Type: "string", Immutable: true, UpdatedAt: time.Now().UTC()}
+	sd.Immutables["locked"] = &state.ImmutableEntry{Value: "v1", Type: "string", CreatedAt: time.Now().UTC()}
 	require.NoError(t, state.SaveToFile(path, sd))
 
 	ctx, buf := newTestContext(t)
@@ -191,7 +193,7 @@ func TestCommandSet_TypedInt(t *testing.T) {
 	sd, loadErr := state.LoadFromFile(path)
 	require.NoError(t, loadErr)
 	// JSON round-trips int64 as float64
-	assert.Equal(t, float64(8080), sd.Values["port"].Value)
+	assert.Equal(t, float64(8080), sd.Parameters["port"])
 }
 
 func TestCommandSet_TypedBool(t *testing.T) {
@@ -208,7 +210,7 @@ func TestCommandSet_TypedBool(t *testing.T) {
 
 	sd, loadErr := state.LoadFromFile(path)
 	require.NoError(t, loadErr)
-	assert.Equal(t, true, sd.Values["enabled"].Value)
+	assert.Equal(t, true, sd.Parameters["enabled"])
 }
 
 func TestCommandSet_TypedFloat(t *testing.T) {
@@ -225,7 +227,7 @@ func TestCommandSet_TypedFloat(t *testing.T) {
 
 	sd, loadErr := state.LoadFromFile(path)
 	require.NoError(t, loadErr)
-	assert.Equal(t, 3.14, sd.Values["ratio"].Value)
+	assert.Equal(t, 3.14, sd.Parameters["ratio"])
 }
 
 func TestCommandSet_TypedInt_Invalid(t *testing.T) {
@@ -296,8 +298,8 @@ func TestCommandDelete_Found(t *testing.T) {
 
 	sd, loadErr := state.LoadFromFile(path)
 	require.NoError(t, loadErr)
-	assert.NotContains(t, sd.Values, "env")
-	assert.Contains(t, sd.Values, "count")
+	assert.NotContains(t, sd.Parameters, "env")
+	assert.Contains(t, sd.Parameters, "count")
 }
 
 func TestCommandDelete_NotFound(t *testing.T) {
@@ -333,12 +335,15 @@ func TestCommandClear(t *testing.T) {
 
 	sd, loadErr := state.LoadFromFile(path)
 	require.NoError(t, loadErr)
-	assert.Empty(t, sd.Values)
+	assert.Empty(t, sd.Parameters)
+	assert.Empty(t, sd.Immutables)
 }
 
 func TestCommandClear_EmptyState(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "empty.json")
+	// Create an empty state file (commands now require the file to exist).
+	require.NoError(t, state.SaveToFile(path, state.NewData()))
 
 	ctx, buf := newTestContext(t)
 	cmd := CommandClear(&settings.Run{BinaryName: "testcli"}, &terminal.IOStreams{Out: buf, ErrOut: buf}, "")

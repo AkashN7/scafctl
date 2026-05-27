@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
-	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/oakwood-commons/scafctl/pkg/state"
@@ -115,29 +114,46 @@ func (s *Server) handleStateList(_ context.Context, request mcp.CallToolRequest)
 
 	type entryInfo struct {
 		Key       string `json:"key"`
-		Value     any    `json:"value"`
+		Value     any    `json:"value,omitempty"`
 		Type      string `json:"type,omitempty"`
-		UpdatedAt string `json:"updatedAt,omitempty"`
-		Immutable bool   `json:"immutable,omitempty"`
+		Section   string `json:"section"`
+		CreatedAt string `json:"createdAt,omitempty"`
+		Readonly  bool   `json:"readonly,omitempty"`
 	}
 
-	keys := make([]string, 0, len(sd.Values))
-	for k := range sd.Values {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
+	totalEntries := len(sd.Parameters) + len(sd.Immutables)
 
-	entries := make([]entryInfo, 0, len(sd.Values))
-	for _, key := range keys {
-		entry := sd.Values[key]
+	paramKeys := make([]string, 0, len(sd.Parameters))
+	for k := range sd.Parameters {
+		paramKeys = append(paramKeys, k)
+	}
+	sort.Strings(paramKeys)
+
+	immKeys := make([]string, 0, len(sd.Immutables))
+	for k := range sd.Immutables {
+		immKeys = append(immKeys, k)
+	}
+	sort.Strings(immKeys)
+
+	entries := make([]entryInfo, 0, totalEntries)
+	for _, key := range paramKeys {
+		entries = append(entries, entryInfo{
+			Key:     key,
+			Value:   sd.Parameters[key],
+			Section: "parameters",
+		})
+	}
+	for _, key := range immKeys {
+		entry := sd.Immutables[key]
 		info := entryInfo{
-			Key:       key,
-			Value:     entry.Value,
-			Type:      entry.Type,
-			Immutable: entry.Immutable,
+			Key:      key,
+			Value:    entry.Value,
+			Type:     entry.Type,
+			Section:  "immutables",
+			Readonly: true,
 		}
-		if !entry.UpdatedAt.IsZero() {
-			info.UpdatedAt = entry.UpdatedAt.Format("2006-01-02T15:04:05Z")
+		if !entry.CreatedAt.IsZero() {
+			info.CreatedAt = entry.CreatedAt.Format("2006-01-02T15:04:05Z")
 		}
 		entries = append(entries, info)
 	}
@@ -173,19 +189,29 @@ func (s *Server) handleStateGet(_ context.Context, request mcp.CallToolRequest) 
 		return newStructuredError(ErrCodeLoadFailed, fmt.Sprintf("failed to load state: %v", err)), nil
 	}
 
-	entry, ok := sd.Values[key]
-	if !ok {
-		return newStructuredError(ErrCodeNotFound, fmt.Sprintf("key %q not found in state", key),
-			WithField("key"),
-			WithSuggestion("Use state_list to see available keys"),
-			WithRelatedTools("state_list"),
-		), nil
+	// Check parameters first, then immutables
+	if val, ok := sd.Parameters[key]; ok {
+		return mcp.NewToolResultJSON(map[string]any{
+			"key":     key,
+			"value":   val,
+			"section": "parameters",
+		})
 	}
 
-	return mcp.NewToolResultJSON(map[string]any{
-		"key":   key,
-		"entry": entry,
-	})
+	if entry, ok := sd.Immutables[key]; ok {
+		return mcp.NewToolResultJSON(map[string]any{
+			"key":     key,
+			"value":   entry.Value,
+			"type":    entry.Type,
+			"section": "immutables",
+		})
+	}
+
+	return newStructuredError(ErrCodeNotFound, fmt.Sprintf("key %q not found in state", key),
+		WithField("key"),
+		WithSuggestion("Use state_list to see available keys"),
+		WithRelatedTools("state_list"),
+	), nil
 }
 
 // handleStateDelete deletes a single key or clears all entries from a state file.
@@ -205,28 +231,40 @@ func (s *Server) handleStateDelete(_ context.Context, request mcp.CallToolReques
 	key := request.GetString("key", "")
 
 	if key != "" {
-		// Delete a single key
-		if _, ok := sd.Values[key]; !ok {
-			return newStructuredError(ErrCodeNotFound, fmt.Sprintf("key %q not found in state", key),
-				WithField("key"),
-				WithRelatedTools("state_list"),
-			), nil
+		// Delete a single key -- check parameters first, then immutables
+		if _, ok := sd.Parameters[key]; ok {
+			delete(sd.Parameters, key)
+			if err := state.SaveToFile(path, sd); err != nil {
+				return newStructuredError(ErrCodeExecFailed, fmt.Sprintf("failed to save state: %v", err)), nil
+			}
+			return mcp.NewToolResultJSON(map[string]any{
+				"success": true,
+				"message": fmt.Sprintf("deleted parameter %q", key),
+			})
 		}
 
-		delete(sd.Values, key)
-		if err := state.SaveToFile(path, sd); err != nil {
-			return newStructuredError(ErrCodeExecFailed, fmt.Sprintf("failed to save state: %v", err)), nil
+		if _, ok := sd.Immutables[key]; ok {
+			delete(sd.Immutables, key)
+			if err := state.SaveToFile(path, sd); err != nil {
+				return newStructuredError(ErrCodeExecFailed, fmt.Sprintf("failed to save state: %v", err)), nil
+			}
+			return mcp.NewToolResultJSON(map[string]any{
+				"success": true,
+				"message": fmt.Sprintf("deleted immutable key %q", key),
+			})
 		}
 
-		return mcp.NewToolResultJSON(map[string]any{
-			"success": true,
-			"message": fmt.Sprintf("deleted key %q", key),
-		})
+		return newStructuredError(ErrCodeNotFound, fmt.Sprintf("key %q not found in state", key),
+			WithField("key"),
+			WithRelatedTools("state_list"),
+		), nil
 	}
 
 	// Clear all entries
-	count := len(sd.Values)
-	sd.Values = make(map[string]*state.Entry)
+	count := len(sd.Parameters) + len(sd.Immutables) + len(sd.Fingerprints)
+	sd.Parameters = make(map[string]any)
+	sd.Immutables = make(map[string]*state.ImmutableEntry)
+	sd.Fingerprints = make(map[string]*state.FingerprintEntry)
 	if err := state.SaveToFile(path, sd); err != nil {
 		return newStructuredError(ErrCodeExecFailed, fmt.Sprintf("failed to save state: %v", err)), nil
 	}
@@ -263,15 +301,6 @@ func (s *Server) handleStateSet(_ context.Context, request mcp.CallToolRequest) 
 		), nil
 	}
 
-	// Check immutability
-	if existing, ok := sd.Values[key]; ok && existing.Immutable {
-		return newStructuredError(ErrCodeInvalidInput, fmt.Sprintf("key %q is immutable and cannot be modified", key),
-			WithField("key"),
-			WithSuggestion("Use state_delete to remove the key first, then set it again"),
-			WithRelatedTools("state_delete"),
-		), nil
-	}
-
 	typ := request.GetString("type", "string")
 	coerced, coerceErr := coerceStateValue(value, typ)
 	if coerceErr != nil {
@@ -280,11 +309,9 @@ func (s *Server) handleStateSet(_ context.Context, request mcp.CallToolRequest) 
 			WithSuggestion(fmt.Sprintf("Provide a valid %s value", typ)),
 		), nil
 	}
-	sd.Values[key] = &state.Entry{
-		Value:     coerced,
-		Type:      typ,
-		UpdatedAt: time.Now().UTC(),
-	}
+
+	// Default to parameters section
+	sd.Parameters[key] = coerced
 
 	if err := state.SaveToFile(path, sd); err != nil {
 		return newStructuredError(ErrCodeExecFailed, fmt.Sprintf("failed to save state: %v", err)), nil

@@ -6,8 +6,8 @@ metadata:
   version: 1.0.0
   description: |
     Functional tests for state persistence with 'run action' command.
-    Verifies that state is loaded before resolvers, the state provider can
-    read previously saved values, and state is saved after the filtered
+    Verifies that state is loaded before resolvers, saved parameters are
+    merged with CLI parameters, and state is saved after the filtered
     action(s) execute successfully. Tests selective action execution with
     state integration.
 
@@ -21,18 +21,13 @@ state:
 spec:
   resolvers:
     environment:
-      description: Deployment environment from parameter, state, or default
+      description: Deployment environment from parameter or default
       type: string
-      saveToState: true
       resolve:
         with:
           - provider: parameter
             inputs:
               key: "env"
-          - provider: state
-            inputs:
-              key: "environment"
-              required: true
           - provider: static
             inputs:
               value: "dev"
@@ -40,13 +35,11 @@ spec:
     version:
       description: Application version
       type: string
-      saveToState: true
       resolve:
         with:
-          - provider: state
+          - provider: parameter
             inputs:
               key: "version"
-              required: true
           - provider: static
             inputs:
               value: "1.0.0"
@@ -78,7 +71,7 @@ spec:
 
   testing:
     config:
-      skipBuiltins: [resolve-defaults, render-defaults]
+      skipBuiltins: [render-defaults]
 
     cases:
       # =====================================================================
@@ -102,10 +95,10 @@ spec:
             message: "Should use default env=dev"
 
       # =====================================================================
-      # Run action with pre-seeded state
+      # Run action with pre-seeded state parameters
       # =====================================================================
       action-reads-state:
-        description: Running action reads resolver values from pre-seeded state
+        description: Running action reads resolver values from pre-seeded state parameters
         command: [run, action]
         args: ["build", "-o", "json"]
         tags: [state, run-action]
@@ -114,7 +107,7 @@ spec:
         init:
           - command: "rm -rf /tmp/scafctl-it-state-runact-reads && mkdir -p /tmp/scafctl-it-state-runact-reads/scafctl"
           - command: >-
-              printf '{"schemaVersion":1,"metadata":{"solution":"test-state-run-action","version":"1.0.0","createdAt":"2025-01-01T00:00:00Z","lastUpdatedAt":"2025-01-01T00:00:00Z","scafctlVersion":"dev"},"command":{"subcommand":"run action","parameters":{}},"values":{"environment":{"value":"production","type":"string","updatedAt":"2025-01-01T00:00:00Z","immutable":false},"version":{"value":"2.5.0","type":"string","updatedAt":"2025-01-01T00:00:00Z","immutable":false}}}'
+              printf '{"schemaVersion":1,"metadata":{"solution":"test-state-run-action","version":"1.0.0","createdAt":"2025-01-01T00:00:00Z","lastUpdatedAt":"2025-01-01T00:00:00Z","scafctlVersion":"dev"},"command":{"subcommand":"run action","parameters":{}},"parameters":{"env":"production","version":"2.5.0"},"immutables":{},"fingerprints":{}}'
               > /tmp/scafctl-it-state-runact-reads/scafctl/run-action-state.json
         cleanup:
           - command: "rm -rf /tmp/scafctl-it-state-runact-reads"
@@ -125,13 +118,13 @@ spec:
           - expression: __output.actions["lint"].status == "succeeded"
             message: "Lint (dependency) should also run"
           - expression: __output.actions["build"].results.stdout.contains("build v2.5.0 for production")
-            message: "Should use values from state"
+            message: "Should use values from saved state parameters"
 
       # =====================================================================
       # Run action with parameter overriding state
       # =====================================================================
       action-param-overrides-state:
-        description: CLI parameter overrides state value when running action
+        description: CLI parameter overrides state parameter when running action
         command: [run, action]
         args: ["deploy", "-o", "json", "-r", "env=canary"]
         tags: [state, run-action]
@@ -140,7 +133,7 @@ spec:
         init:
           - command: "rm -rf /tmp/scafctl-it-state-runact-override && mkdir -p /tmp/scafctl-it-state-runact-override/scafctl"
           - command: >-
-              printf '{"schemaVersion":1,"metadata":{"solution":"test-state-run-action","version":"1.0.0","createdAt":"2025-01-01T00:00:00Z","lastUpdatedAt":"2025-01-01T00:00:00Z","scafctlVersion":"dev"},"command":{"subcommand":"run action","parameters":{}},"values":{"environment":{"value":"production","type":"string","updatedAt":"2025-01-01T00:00:00Z","immutable":false}}}'
+              printf '{"schemaVersion":1,"metadata":{"solution":"test-state-run-action","version":"1.0.0","createdAt":"2025-01-01T00:00:00Z","lastUpdatedAt":"2025-01-01T00:00:00Z","scafctlVersion":"dev"},"command":{"subcommand":"run action","parameters":{}},"parameters":{"env":"production"},"immutables":{},"fingerprints":{}}'
               > /tmp/scafctl-it-state-runact-override/scafctl/run-action-state.json
         cleanup:
           - command: "rm -rf /tmp/scafctl-it-state-runact-override"
@@ -168,8 +161,5 @@ spec:
           - expression: __exitCode == 0
           - expression: __output.status == "succeeded"
           - expression: __output.actions["lint"].status == "succeeded"
-            message: "lint should run as transitive dependency"
           - expression: __output.actions["build"].status == "succeeded"
-            message: "build should run as transitive dependency"
           - expression: __output.actions["deploy"].status == "succeeded"
-            message: "deploy should be the target action"

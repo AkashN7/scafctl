@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"time"
 
 	"github.com/oakwood-commons/scafctl/pkg/celexp"
@@ -17,9 +16,9 @@ import (
 	"github.com/oakwood-commons/scafctl/pkg/spec"
 )
 
-// Manager orchestrates the state lifecycle: pre-execution loading, context
-// injection, and post-execution saving. It is called by the CLI command
-// layer before and after resolver execution.
+// Manager orchestrates the state lifecycle: pre-execution loading, parameter
+// merging, and post-execution saving. It is called by the CLI command layer
+// before and after resolver execution.
 type Manager struct {
 	registry *provider.Registry
 	config   *Config
@@ -35,13 +34,17 @@ func NewManager(config *Config, registry *provider.Registry, version string) *Ma
 	}
 }
 
-// LoadResult is returned by Load with the loaded state and enriched context.
+// LoadResult is returned by Load with the loaded state and merged parameters.
 type LoadResult struct {
 	// Ctx is the context enriched with state.WithState.
 	Ctx context.Context
 
 	// Data is the loaded (or empty) state data.
 	Data *Data
+
+	// MergedParams is the effective parameter set (saved params merged with CLI params).
+	// CLI params override saved params; new CLI keys are added.
+	MergedParams map[string]any
 
 	// Skipped is true when state is disabled or the enabled ValueRef is falsy.
 	Skipped bool
@@ -53,14 +56,15 @@ type LoadResult struct {
 //  2. If disabled, returns LoadResult{Skipped: true}.
 //  3. Resolves backend inputs with params as __params.
 //  4. Calls the backend provider with operation=state_load.
-//  5. Captures command info.
-//  6. Injects state into context via WithState.
+//  5. Merges saved parameters with CLI params (CLI wins on conflict).
+//  6. Captures command info.
+//  7. Injects state into context via WithState.
 func (m *Manager) Load(ctx context.Context, params map[string]any, command CommandInfo) (*LoadResult, error) {
 	if m.config == nil {
 		return &LoadResult{Ctx: ctx, Skipped: true}, nil
 	}
 
-	// Evaluate enabled — no resolver data at load time, only CLI params
+	// Evaluate enabled -- no resolver data at load time, only CLI params
 	enabled, err := m.evaluateEnabled(ctx, nil, params)
 	if err != nil {
 		return nil, fmt.Errorf("state: evaluate enabled: %w", err)
@@ -69,7 +73,7 @@ func (m *Manager) Load(ctx context.Context, params map[string]any, command Comma
 		return &LoadResult{Ctx: ctx, Skipped: true}, nil
 	}
 
-	// Resolve backend inputs — no resolver data at load time, only CLI params
+	// Resolve backend inputs -- no resolver data at load time, only CLI params
 	backendInputs, err := m.resolveBackendInputs(ctx, nil, params)
 	if err != nil {
 		return nil, fmt.Errorf("state: resolve backend inputs: %w", err)
@@ -95,6 +99,9 @@ func (m *Manager) Load(ctx context.Context, params map[string]any, command Comma
 		return nil, fmt.Errorf("state: extract loaded data: %w", err)
 	}
 
+	// Merge saved parameters with CLI params (CLI wins)
+	mergedParams := MergeParameters(stateData.Parameters, params)
+
 	// Capture command info
 	stateData.Command = command
 
@@ -102,59 +109,35 @@ func (m *Manager) Load(ctx context.Context, params map[string]any, command Comma
 	enrichedCtx := WithState(ctx, stateData)
 
 	return &LoadResult{
-		Ctx:  enrichedCtx,
-		Data: stateData,
+		Ctx:          enrichedCtx,
+		Data:         stateData,
+		MergedParams: mergedParams,
 	}, nil
 }
 
 // Save executes the post-execution state lifecycle:
-//  1. Collects saveToState resolver results from resolverCtx.
-//  2. Updates state data with collected values.
+//  1. Saves the merged parameter set.
+//  2. Checks immutable resolvers (saves new, verifies existing).
 //  3. Updates metadata timestamps.
 //  4. Calls the backend provider with operation=state_save.
 //
-// params are the original CLI parameters, available as __params in backend
-// input CEL expressions. resolverData contains resolver outputs, available
-// as _ in CEL expressions.
-func (m *Manager) Save(ctx context.Context, stateData *Data, resolverCtx *resolver.Context, resolvers []*resolver.Resolver, params, resolverData map[string]any, solMeta SolutionMeta) error {
+// params are the merged parameters for this execution. resolverData contains
+// resolver outputs, available as _ in CEL expressions for backend inputs.
+func (m *Manager) Save(ctx context.Context, stateData *Data, resolverCtx *resolver.Context, resolvers []*resolver.Resolver, mergedParams, resolverData map[string]any, solMeta SolutionMeta) error {
 	if m.config == nil || stateData == nil {
 		return nil
 	}
 
-	// Ensure maps are initialized before assigning entries
-	if stateData.Values == nil {
-		stateData.Values = make(map[string]*Entry)
-	}
+	// Save the merged parameter set
+	stateData.Parameters = mergedParams
 
-	// Collect saveToState values
-	now := time.Now().UTC()
-	for _, r := range resolvers {
-		if !r.SaveToState {
-			continue
-		}
-		result, ok := resolverCtx.GetResult(r.Name)
-		if !ok || result.Status != resolver.ExecutionStatusSuccess {
-			continue
-		}
-
-		// Enforce immutability: if the entry already exists and is immutable,
-		// skip silently when the value is unchanged, or error when it differs.
-		if existing, exists := stateData.Values[r.Name]; exists && existing.Immutable {
-			if reflect.DeepEqual(existing.Value, result.Value) {
-				continue // same value — no-op
-			}
-			return fmt.Errorf("%w %q; use 'scafctl state delete' to remove it first", ErrImmutableEntry, r.Name)
-		}
-
-		stateData.Values[r.Name] = &Entry{
-			Value:     result.Value,
-			Type:      string(r.Type),
-			UpdatedAt: now,
-			Immutable: r.Immutable,
-		}
+	// Check and save immutable resolver values
+	if err := CheckImmutables(stateData, resolverCtx, resolvers); err != nil {
+		return err
 	}
 
 	// Update metadata
+	now := time.Now().UTC()
 	if stateData.Metadata.CreatedAt.IsZero() {
 		stateData.Metadata.CreatedAt = now
 	}
@@ -163,9 +146,9 @@ func (m *Manager) Save(ctx context.Context, stateData *Data, resolverCtx *resolv
 	stateData.Metadata.Version = solMeta.Version
 	stateData.Metadata.ScafctlVersion = m.version
 
-	// Resolve backend inputs for save — resolver outputs are available as _
+	// Resolve backend inputs for save -- resolver outputs are available as _
 	// and CLI params as __params in backend input expressions.
-	backendInputs, err := m.resolveBackendInputs(ctx, resolverData, params)
+	backendInputs, err := m.resolveBackendInputs(ctx, resolverData, mergedParams)
 	if err != nil {
 		return fmt.Errorf("state: resolve backend inputs for save: %w", err)
 	}
@@ -176,7 +159,7 @@ func (m *Manager) Save(ctx context.Context, stateData *Data, resolverCtx *resolv
 		return err
 	}
 
-	// Execute save — convert stateData to map[string]any so that the provider
+	// Execute save -- convert stateData to map[string]any so that the provider
 	// executor's JSON-schema validator can inspect the value (it cannot
 	// validate Go structs directly).
 	backendInputs["operation"] = "state_save"

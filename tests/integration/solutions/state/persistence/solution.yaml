@@ -6,8 +6,9 @@ metadata:
   version: 1.0.0
   description: |
     Functional tests for state persistence.
-    Verifies state loading, saving, fallback chains with the state provider,
-    and round-trip persistence via pre-seeded state files.
+    Verifies that CLI parameters are automatically persisted to state and
+    replayed on subsequent runs via the parameter provider. Tests round-trip
+    persistence via pre-seeded state files with the new parameters schema.
 
 state:
   enabled: true
@@ -19,53 +20,33 @@ state:
 spec:
   resolvers:
     greeting:
-      description: A greeting resolved from static, saved to state
+      description: A greeting resolved from parameter or static default
       type: string
-      saveToState: true
       resolve:
         with:
+          - provider: parameter
+            inputs:
+              key: "greeting"
           - provider: static
             inputs:
               value: hello-world
 
     counter:
-      description: A numeric value resolved from static, saved to state
+      description: A numeric value resolved from parameter or static default
       type: int
-      saveToState: true
       resolve:
         with:
+          - provider: parameter
+            inputs:
+              key: "counter"
           - provider: static
             inputs:
               value: 42
 
-    fromState:
-      description: Read a value from state with fallback to static
-      type: string
-      resolve:
-        with:
-          - provider: state
-            inputs:
-              key: "greeting"
-              required: true
-          - provider: static
-            inputs:
-              value: fallback-value
-
-    fromStateOptional:
-      description: Read a value from state with required false (returns fallback)
-      resolve:
-        with:
-          - provider: state
-            inputs:
-              key: "nonexistent"
-              required: false
-              fallback: optional-fallback
-
   testing:
     config:
-      # resolve-defaults: resolvers depend on state context
       # render-defaults: solution has no workflow.actions section
-      skipBuiltins: [resolve-defaults, render-defaults]
+      skipBuiltins: [render-defaults]
 
     cases:
       _base:
@@ -77,7 +58,7 @@ spec:
           - expression: __exitCode == 0
 
       first-run-static:
-        description: Verify resolvers work on first run (empty state) with correct fallback behavior
+        description: Verify resolvers work on first run (empty state) using static defaults
         extends: [_base]
         tags: [smoke]
         env:
@@ -88,30 +69,24 @@ spec:
           - command: "rm -rf /tmp/scafctl-it-state-first-run"
         assertions:
           - expression: __output.greeting == "hello-world"
-            message: "Static resolver should produce hello-world"
+            message: "First run should fall through to static default"
           - expression: __output.counter == 42
-            message: "Static resolver should produce 42"
-          - expression: __output.fromState == "fallback-value"
-            message: "State miss with required=true should fall through to static"
-          - expression: __output.fromStateOptional == "optional-fallback"
-            message: "State miss with required=false should return fallback"
+            message: "First run should fall through to static default int"
 
       state-preseeded:
-        description: Verify state provider reads from a pre-seeded state file
+        description: Verify parameter provider reads from pre-seeded state parameters
         extends: [_base]
         env:
           XDG_STATE_HOME: /tmp/scafctl-it-state-preseeded
         init:
           - command: "rm -rf /tmp/scafctl-it-state-preseeded && mkdir -p /tmp/scafctl-it-state-preseeded/scafctl"
           - command: >-
-              printf '{"schemaVersion":1,"metadata":{"solution":"test-state-persistence","version":"1.0.0","createdAt":"2025-01-01T00:00:00Z","lastUpdatedAt":"2025-01-01T00:00:00Z","scafctlVersion":"dev"},"command":{"subcommand":"run resolver","parameters":{}},"values":{"greeting":{"value":"hello-from-state","type":"string","updatedAt":"2025-01-01T00:00:00Z"}}}'
+              printf '{"schemaVersion":1,"metadata":{"solution":"test-state-persistence","version":"1.0.0","createdAt":"2025-01-01T00:00:00Z","lastUpdatedAt":"2025-01-01T00:00:00Z","scafctlVersion":"dev"},"command":{"subcommand":"run resolver","parameters":{}},"parameters":{"greeting":"hello-from-state","counter":"99"},"immutables":{},"fingerprints":{}}'
               > /tmp/scafctl-it-state-preseeded/scafctl/state.json
         cleanup:
           - command: "rm -rf /tmp/scafctl-it-state-preseeded"
         assertions:
-          - expression: __output.fromState == "hello-from-state"
-            message: "State provider should read pre-seeded value"
-          - expression: __output.greeting == "hello-world"
-            message: "Static resolver ignores state and produces hello-world"
-          - expression: __output.fromStateOptional == "optional-fallback"
-            message: "Non-existent key should return fallback"
+          - expression: __output.greeting == "hello-from-state"
+            message: "Parameter provider should read pre-seeded value from state"
+          - expression: __output.counter == 99
+            message: "Parameter provider should read pre-seeded int from state"

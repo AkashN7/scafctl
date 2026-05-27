@@ -5,6 +5,7 @@ package state
 
 import (
 	"fmt"
+	"os"
 	"sort"
 
 	"github.com/oakwood-commons/scafctl/pkg/cmd/flags"
@@ -46,6 +47,18 @@ func CommandList(cliParams *settings.Run, ioStreams *terminal.IOStreams, _ strin
 				return exitcode.WithCode(err, exitcode.InvalidInput)
 			}
 
+			// Resolve and verify the file exists before loading.
+			resolved, err := state.ResolveStatePath(opts.Path)
+			if err != nil {
+				w.Errorf("%v", err)
+				return exitcode.WithCode(err, exitcode.InvalidInput)
+			}
+			if _, statErr := os.Stat(resolved); os.IsNotExist(statErr) {
+				err := fmt.Errorf("state file not found: %s", resolved)
+				w.Errorf("%v", err)
+				return exitcode.WithCode(err, exitcode.FileNotFound)
+			}
+
 			sd, err := state.LoadFromFile(opts.Path)
 			if err != nil {
 				err := fmt.Errorf("failed to load state: %w", err)
@@ -53,7 +66,8 @@ func CommandList(cliParams *settings.Run, ioStreams *terminal.IOStreams, _ strin
 				return exitcode.WithCode(err, exitcode.GeneralError)
 			}
 
-			if len(sd.Values) == 0 {
+			totalEntries := len(sd.Parameters) + len(sd.Immutables)
+			if totalEntries == 0 {
 				if !cliParams.IsQuiet {
 					w.Warning("No state entries found")
 				}
@@ -62,24 +76,43 @@ func CommandList(cliParams *settings.Run, ioStreams *terminal.IOStreams, _ strin
 
 			kvxOpts := flags.ToKvxOutputOptions(&opts.KvxOutputFlags, kvx.WithIOStreams(ioStreams))
 
-			keys := make([]string, 0, len(sd.Values))
-			for k := range sd.Values {
-				keys = append(keys, k)
-			}
-			sort.Strings(keys)
+			data := make([]map[string]any, 0, totalEntries)
 
-			data := make([]map[string]any, 0, len(sd.Values))
-			for _, name := range keys {
-				entry := sd.Values[name]
-				updatedAt := ""
-				if !entry.UpdatedAt.IsZero() {
-					updatedAt = entry.UpdatedAt.Format("2006-01-02T15:04:05Z")
+			// Parameters section
+			paramKeys := make([]string, 0, len(sd.Parameters))
+			for k := range sd.Parameters {
+				paramKeys = append(paramKeys, k)
+			}
+			sort.Strings(paramKeys)
+
+			for _, name := range paramKeys {
+				data = append(data, map[string]any{
+					"key":      name,
+					"section":  "parameters",
+					"value":    sd.Parameters[name],
+					"readonly": false,
+				})
+			}
+
+			// Immutables section
+			immKeys := make([]string, 0, len(sd.Immutables))
+			for k := range sd.Immutables {
+				immKeys = append(immKeys, k)
+			}
+			sort.Strings(immKeys)
+
+			for _, name := range immKeys {
+				entry := sd.Immutables[name]
+				createdAt := ""
+				if !entry.CreatedAt.IsZero() {
+					createdAt = entry.CreatedAt.Format("2006-01-02T15:04:05Z")
 				}
 				data = append(data, map[string]any{
 					"key":       name,
+					"section":   "immutables",
 					"type":      entry.Type,
-					"updatedAt": updatedAt,
-					"immutable": entry.Immutable,
+					"createdAt": createdAt,
+					"readonly":  true,
 				})
 			}
 

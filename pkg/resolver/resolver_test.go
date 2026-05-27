@@ -407,13 +407,11 @@ func TestResolver_ImmutableField_YAML(t *testing.T) {
 name: cluster_id
 type: string
 immutable: true
-saveToState: true
 `
 		var r Resolver
 		err := yaml.Unmarshal([]byte(input), &r)
 		require.NoError(t, err)
 		assert.True(t, r.Immutable)
-		assert.True(t, r.SaveToState)
 	})
 
 	t.Run("unmarshal immutable defaults to false", func(t *testing.T) {
@@ -421,18 +419,16 @@ saveToState: true
 		input := `
 name: regular
 type: string
-saveToState: true
 `
 		var r Resolver
 		err := yaml.Unmarshal([]byte(input), &r)
 		require.NoError(t, err)
 		assert.False(t, r.Immutable)
-		assert.True(t, r.SaveToState)
 	})
 
 	t.Run("marshal omits immutable when false", func(t *testing.T) {
 		t.Parallel()
-		r := Resolver{Name: "test", SaveToState: true}
+		r := Resolver{Name: "test"}
 		data, err := yaml.Marshal(&r)
 		require.NoError(t, err)
 		assert.NotContains(t, string(data), "immutable")
@@ -440,7 +436,7 @@ saveToState: true
 
 	t.Run("marshal includes immutable when true", func(t *testing.T) {
 		t.Parallel()
-		r := Resolver{Name: "test", Immutable: true, SaveToState: true}
+		r := Resolver{Name: "test", Immutable: true}
 		data, err := yaml.Marshal(&r)
 		require.NoError(t, err)
 		assert.Contains(t, string(data), "immutable: true")
@@ -452,7 +448,7 @@ func TestResolver_ImmutableField_JSON(t *testing.T) {
 
 	t.Run("roundtrip", func(t *testing.T) {
 		t.Parallel()
-		r := Resolver{Name: "cluster_id", Immutable: true, SaveToState: true, Type: "string"}
+		r := Resolver{Name: "cluster_id", Immutable: true, Type: "string"}
 		data, err := json.Marshal(&r)
 		require.NoError(t, err)
 		assert.Contains(t, string(data), `"immutable":true`)
@@ -461,7 +457,6 @@ func TestResolver_ImmutableField_JSON(t *testing.T) {
 		err = json.Unmarshal(data, &decoded)
 		require.NoError(t, err)
 		assert.True(t, decoded.Immutable)
-		assert.True(t, decoded.SaveToState)
 	})
 
 	t.Run("omits immutable when false", func(t *testing.T) {

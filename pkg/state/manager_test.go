@@ -94,7 +94,7 @@ func literalValueRef(val any) *spec.ValueRef {
 func TestManagerLoad(t *testing.T) {
 	existingState := NewData()
 	existingState.Metadata.Solution = "test-app"
-	existingState.Values["existing_key"] = &Entry{Value: "existing_val", Type: "string"}
+	existingState.Parameters["env"] = "prod"
 
 	tests := []struct {
 		name     string
@@ -243,6 +243,7 @@ func TestManagerSave(t *testing.T) {
 		config  *Config
 		backend *mockBackendProvider
 		state   *Data
+		params  map[string]any
 		setup   func() (*resolver.Context, []*resolver.Resolver)
 		wantErr bool
 		check   func(t *testing.T, sd *Data, backend *mockBackendProvider)
@@ -256,7 +257,7 @@ func TestManagerSave(t *testing.T) {
 			},
 		},
 		{
-			name: "collects saveToState values",
+			name: "persists merged parameters",
 			config: &Config{
 				Enabled: literalValueRef(true),
 				Backend: Backend{
@@ -266,40 +267,22 @@ func TestManagerSave(t *testing.T) {
 			},
 			backend: &mockBackendProvider{},
 			state:   NewData(),
+			params:  map[string]any{"key1": "val1", "key2": "val2"},
 			setup: func() (*resolver.Context, []*resolver.Resolver) {
 				rctx := resolver.NewContext()
 				rctx.SetResult("api_key", &resolver.ExecutionResult{
 					Value:  "secret123",
 					Status: resolver.ExecutionStatusSuccess,
 				})
-				rctx.SetResult("name", &resolver.ExecutionResult{
-					Value:  "app",
-					Status: resolver.ExecutionStatusSuccess,
-				})
-				rctx.SetResult("failed_one", &resolver.ExecutionResult{
-					Value:  "x",
-					Status: resolver.ExecutionStatusFailed,
-				})
 				resolvers := []*resolver.Resolver{
-					{Name: "api_key", Type: "string", SaveToState: true},
-					{Name: "name", Type: "string", SaveToState: false},
-					{Name: "failed_one", Type: "string", SaveToState: true},
+					{Name: "api_key", Type: "string"},
 				}
 				return rctx, resolvers
 			},
 			check: func(t *testing.T, sd *Data, backend *mockBackendProvider) {
-				// api_key should be saved (saveToState + success)
-				assert.Contains(t, sd.Values, "api_key")
-				assert.Equal(t, "secret123", sd.Values["api_key"].Value)
-				assert.Equal(t, "string", sd.Values["api_key"].Type)
-
-				// name should NOT be saved (saveToState is false)
-				_, hasName := sd.Values["name"]
-				assert.False(t, hasName)
-
-				// failed_one should NOT be saved (status is failed)
-				_, hasFailed := sd.Values["failed_one"]
-				assert.False(t, hasFailed)
+				// merged params should be saved
+				assert.Equal(t, "val1", sd.Parameters["key1"])
+				assert.Equal(t, "val2", sd.Parameters["key2"])
 
 				// backend save should have been called
 				assert.Len(t, backend.saveCalls, 1)
@@ -380,7 +363,7 @@ func TestManagerSave(t *testing.T) {
 			rctx, resolvers := tt.setup()
 			solMeta := SolutionMeta{Name: "my-app", Version: "2.0.0"}
 
-			err := mgr.Save(context.Background(), tt.state, rctx, resolvers, nil, nil, solMeta)
+			err := mgr.Save(context.Background(), tt.state, rctx, resolvers, tt.params, nil, solMeta)
 			if tt.wantErr {
 				assert.Error(t, err)
 				return
@@ -402,7 +385,7 @@ func TestManagerSave_Immutable(t *testing.T) {
 		},
 	}
 
-	t.Run("first write sets immutable flag", func(t *testing.T) {
+	t.Run("first write saves immutable entry", func(t *testing.T) {
 		backend := &mockBackendProvider{}
 		reg := newTestRegistry(t, backend)
 		mgr := NewManager(baseConfig, reg, "test-version")
@@ -413,16 +396,16 @@ func TestManagerSave_Immutable(t *testing.T) {
 			Status: resolver.ExecutionStatusSuccess,
 		})
 		resolvers := []*resolver.Resolver{
-			{Name: "cluster_id", Type: "string", SaveToState: true, Immutable: true},
+			{Name: "cluster_id", Type: "string", Immutable: true},
 		}
 		sd := NewData()
 		solMeta := SolutionMeta{Name: "my-app", Version: "1.0.0"}
 
 		err := mgr.Save(context.Background(), sd, rctx, resolvers, nil, nil, solMeta)
 		assert.NoError(t, err)
-		assert.Contains(t, sd.Values, "cluster_id")
-		assert.True(t, sd.Values["cluster_id"].Immutable)
-		assert.Equal(t, "uuid-1234", sd.Values["cluster_id"].Value)
+		assert.Contains(t, sd.Immutables, "cluster_id")
+		assert.Equal(t, "uuid-1234", sd.Immutables["cluster_id"].Value)
+		assert.Equal(t, "string", sd.Immutables["cluster_id"].Type)
 	})
 
 	t.Run("same value is no-op", func(t *testing.T) {
@@ -436,23 +419,22 @@ func TestManagerSave_Immutable(t *testing.T) {
 			Status: resolver.ExecutionStatusSuccess,
 		})
 		resolvers := []*resolver.Resolver{
-			{Name: "cluster_id", Type: "string", SaveToState: true, Immutable: true},
+			{Name: "cluster_id", Type: "string", Immutable: true},
 		}
 
-		// Pre-populate state with the same value and immutable flag
+		// Pre-populate state with the same value
 		sd := NewData()
-		sd.Values["cluster_id"] = &Entry{
+		sd.Immutables["cluster_id"] = &ImmutableEntry{
 			Value:     "uuid-1234",
 			Type:      "string",
-			UpdatedAt: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
-			Immutable: true,
+			CreatedAt: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
 		}
 		solMeta := SolutionMeta{Name: "my-app", Version: "1.0.0"}
 
 		err := mgr.Save(context.Background(), sd, rctx, resolvers, nil, nil, solMeta)
 		assert.NoError(t, err)
-		// Timestamp should remain unchanged (entry was skipped)
-		assert.Equal(t, time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), sd.Values["cluster_id"].UpdatedAt)
+		// CreatedAt should remain unchanged (entry was skipped)
+		assert.Equal(t, time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), sd.Immutables["cluster_id"].CreatedAt)
 	})
 
 	t.Run("different value errors", func(t *testing.T) {
@@ -466,15 +448,15 @@ func TestManagerSave_Immutable(t *testing.T) {
 			Status: resolver.ExecutionStatusSuccess,
 		})
 		resolvers := []*resolver.Resolver{
-			{Name: "cluster_id", Type: "string", SaveToState: true, Immutable: true},
+			{Name: "cluster_id", Type: "string", Immutable: true},
 		}
 
 		// Pre-populate state with different value
 		sd := NewData()
-		sd.Values["cluster_id"] = &Entry{
+		sd.Immutables["cluster_id"] = &ImmutableEntry{
 			Value:     "uuid-1234-old",
 			Type:      "string",
-			Immutable: true,
+			CreatedAt: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
 		}
 		solMeta := SolutionMeta{Name: "my-app", Version: "1.0.0"}
 
@@ -488,7 +470,7 @@ func TestManagerSave_Immutable(t *testing.T) {
 		assert.Empty(t, backend.saveCalls)
 	})
 
-	t.Run("non-immutable resolver does not set flag", func(t *testing.T) {
+	t.Run("non-immutable resolver does not create entry", func(t *testing.T) {
 		backend := &mockBackendProvider{}
 		reg := newTestRegistry(t, backend)
 		mgr := NewManager(baseConfig, reg, "test-version")
@@ -499,15 +481,14 @@ func TestManagerSave_Immutable(t *testing.T) {
 			Status: resolver.ExecutionStatusSuccess,
 		})
 		resolvers := []*resolver.Resolver{
-			{Name: "env", Type: "string", SaveToState: true, Immutable: false},
+			{Name: "env", Type: "string", Immutable: false},
 		}
 		sd := NewData()
 		solMeta := SolutionMeta{Name: "my-app", Version: "1.0.0"}
 
 		err := mgr.Save(context.Background(), sd, rctx, resolvers, nil, nil, solMeta)
 		assert.NoError(t, err)
-		assert.Contains(t, sd.Values, "env")
-		assert.False(t, sd.Values["env"].Immutable)
+		assert.NotContains(t, sd.Immutables, "env")
 	})
 }
 
@@ -594,7 +575,7 @@ func TestStructToMap(t *testing.T) {
 		sd := NewData()
 		sd.SchemaVersion = 1
 		sd.Metadata.Solution = "test-app"
-		sd.Values["key1"] = &Entry{Value: "val1", Type: "string"}
+		sd.Parameters["key1"] = "val1"
 
 		m, err := structToMap(sd)
 		assert.NoError(t, err)
@@ -604,12 +585,9 @@ func TestStructToMap(t *testing.T) {
 		assert.True(t, ok)
 		assert.Equal(t, "test-app", meta["solution"])
 
-		vals, ok := m["values"].(map[string]any)
+		params, ok := m["parameters"].(map[string]any)
 		assert.True(t, ok)
-		entry, ok := vals["key1"].(map[string]any)
-		assert.True(t, ok)
-		assert.Equal(t, "val1", entry["value"])
-		assert.Equal(t, "string", entry["type"])
+		assert.Equal(t, "val1", params["key1"])
 	})
 
 	t.Run("empty data", func(t *testing.T) {
@@ -651,8 +629,8 @@ func TestExtractStateData(t *testing.T) {
 
 	t.Run("direct pointer", func(t *testing.T) {
 		t.Parallel()
-		expected := NewMockData("test", "1.0.0", map[string]*Entry{
-			"env": {Value: "prod", Type: "string"},
+		expected := NewMockData("test", "1.0.0", map[string]any{
+			"env": "prod",
 		})
 		result, err := extractStateData(&provider.ExecutionResult{
 			Output: provider.Output{Data: map[string]any{
@@ -681,14 +659,11 @@ func TestExtractStateData(t *testing.T) {
 				"subcommand": "run solution",
 				"parameters": map[string]any{},
 			},
-			"values": map[string]any{
-				"region": map[string]any{
-					"value":     "us-east-1",
-					"type":      "string",
-					"updatedAt": "2025-01-01T00:00:00Z",
-					"immutable": false,
-				},
+			"parameters": map[string]any{
+				"region": "us-east-1",
 			},
+			"immutables":   map[string]any{},
+			"fingerprints": map[string]any{},
 		}
 		result, err := extractStateData(&provider.ExecutionResult{
 			Output: provider.Output{Data: map[string]any{
@@ -699,8 +674,8 @@ func TestExtractStateData(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, 1, result.SchemaVersion)
 		assert.Equal(t, "test-app", result.Metadata.Solution)
-		assert.Contains(t, result.Values, "region")
-		assert.Equal(t, "us-east-1", result.Values["region"].Value)
+		assert.Contains(t, result.Parameters, "region")
+		assert.Equal(t, "us-east-1", result.Parameters["region"])
 	})
 
 	t.Run("unsupported type", func(t *testing.T) {

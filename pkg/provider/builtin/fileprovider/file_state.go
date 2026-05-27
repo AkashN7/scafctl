@@ -36,8 +36,14 @@ func (p *FileProvider) executeStateLoad(absPath string) (*provider.Output, error
 		return nil, fmt.Errorf("state load: unmarshal: %w", err)
 	}
 
-	if stateData.Values == nil {
-		stateData.Values = make(map[string]*state.Entry)
+	if stateData.Parameters == nil {
+		stateData.Parameters = make(map[string]any)
+	}
+	if stateData.Immutables == nil {
+		stateData.Immutables = make(map[string]*state.ImmutableEntry)
+	}
+	if stateData.Fingerprints == nil {
+		stateData.Fingerprints = make(map[string]*state.FingerprintEntry)
 	}
 	if stateData.Command.Parameters == nil {
 		stateData.Command.Parameters = make(map[string]string)

@@ -6,9 +6,9 @@ metadata:
   version: 1.0.0
   description: |
     Functional tests for verifying state is actually persisted to disk.
-    Uses two sequential runs: first run saves values via saveToState,
-    second run reads them back via the state provider to confirm persistence.
-    Also tests typed value round-trips (int, bool, string).
+    Uses pre-seeded state files to simulate second runs. Tests that saved
+    parameters are replayed via the parameter provider, and that CLI
+    parameters override saved values.
 
 state:
   enabled: true
@@ -20,59 +20,45 @@ state:
 spec:
   resolvers:
     name:
-      description: String value that gets saved to state
+      description: String value resolved from parameter or default
       type: string
-      saveToState: true
       resolve:
         with:
           - provider: parameter
-            onError: continue
             inputs:
               key: "name"
-          - provider: state
-            onError: continue
-            inputs:
-              key: "name"
-              required: true
           - provider: static
             inputs:
               value: "default-name"
 
     count:
-      description: Integer value saved to state
+      description: Integer value resolved from parameter or default
       type: int
-      saveToState: true
       resolve:
         with:
-          - provider: state
-            onError: continue
+          - provider: parameter
             inputs:
               key: "count"
-              required: true
           - provider: static
             inputs:
               value: 99
 
     enabled_flag:
-      description: Boolean value saved to state
+      description: Boolean value resolved from parameter or default
       type: bool
-      saveToState: true
       resolve:
         with:
-          - provider: state
-            onError: continue
+          - provider: parameter
             inputs:
               key: "enabled_flag"
-              required: true
           - provider: static
             inputs:
               value: true
 
   testing:
     config:
-      # resolve-defaults: resolvers depend on state context
       # render-defaults: solution has no workflow.actions section
-      skipBuiltins: [resolve-defaults, render-defaults]
+      skipBuiltins: [render-defaults]
 
     cases:
       _base:
@@ -108,24 +94,24 @@ spec:
       # Verify state was persisted: pre-seeded state file simulates second run
       # =====================================================================
       second-run-from-state:
-        description: Second run reads values from state file (simulated via pre-seed)
+        description: Second run reads values from state parameters (simulated via pre-seed)
         extends: [_base]
         env:
           XDG_STATE_HOME: /tmp/scafctl-it-state-save-second
         init:
           - command: "rm -rf /tmp/scafctl-it-state-save-second && mkdir -p /tmp/scafctl-it-state-save-second/scafctl"
           - command: >-
-              printf '{"schemaVersion":1,"metadata":{"solution":"test-state-save-verify","version":"1.0.0","createdAt":"2025-01-01T00:00:00Z","lastUpdatedAt":"2025-01-01T00:00:00Z","scafctlVersion":"dev"},"command":{"subcommand":"run resolver","parameters":{}},"values":{"name":{"value":"saved-name","type":"string","updatedAt":"2025-01-01T00:00:00Z","immutable":false},"count":{"value":42,"type":"int","updatedAt":"2025-01-01T00:00:00Z","immutable":false},"enabled_flag":{"value":false,"type":"bool","updatedAt":"2025-01-01T00:00:00Z","immutable":false}}}'
+              printf '{"schemaVersion":1,"metadata":{"solution":"test-state-save-verify","version":"1.0.0","createdAt":"2025-01-01T00:00:00Z","lastUpdatedAt":"2025-01-01T00:00:00Z","scafctlVersion":"dev"},"command":{"subcommand":"run resolver","parameters":{}},"parameters":{"name":"saved-name","count":"42","enabled_flag":"false"},"immutables":{},"fingerprints":{}}'
               > /tmp/scafctl-it-state-save-second/scafctl/state.json
         cleanup:
           - command: "rm -rf /tmp/scafctl-it-state-save-second"
         assertions:
           - expression: __output.name == "saved-name"
-            message: "State provider should return persisted string value"
+            message: "Parameter provider should return persisted string value"
           - expression: __output.count == 42
-            message: "State provider should return persisted int value"
+            message: "Parameter provider should return persisted int value"
           - expression: __output.enabled_flag == false
-            message: "State provider should return persisted bool value"
+            message: "Parameter provider should return persisted bool value"
 
       # =====================================================================
       # Parameter override is persisted (not the static default)
@@ -158,7 +144,7 @@ spec:
         init:
           - command: "rm -rf /tmp/scafctl-it-state-save-overwrite && mkdir -p /tmp/scafctl-it-state-save-overwrite/scafctl"
           - command: >-
-              printf '{"schemaVersion":1,"metadata":{"solution":"test-state-save-verify","version":"1.0.0","createdAt":"2025-01-01T00:00:00Z","lastUpdatedAt":"2025-01-01T00:00:00Z","scafctlVersion":"dev"},"command":{"subcommand":"run resolver","parameters":{}},"values":{"name":{"value":"old-name","type":"string","updatedAt":"2025-01-01T00:00:00Z","immutable":false}}}'
+              printf '{"schemaVersion":1,"metadata":{"solution":"test-state-save-verify","version":"1.0.0","createdAt":"2025-01-01T00:00:00Z","lastUpdatedAt":"2025-01-01T00:00:00Z","scafctlVersion":"dev"},"command":{"subcommand":"run resolver","parameters":{}},"parameters":{"name":"old-name"},"immutables":{},"fingerprints":{}}'
               > /tmp/scafctl-it-state-save-overwrite/scafctl/state.json
         cleanup:
           - command: "rm -rf /tmp/scafctl-it-state-save-overwrite"

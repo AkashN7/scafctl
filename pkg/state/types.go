@@ -68,8 +68,19 @@ type Data struct {
 	// Command captures the most recent invocation for validation replay.
 	Command CommandInfo `json:"command" doc:"Most recent invocation"`
 
-	// Values maps resolver names to persisted entries.
-	Values map[string]*Entry `json:"values" doc:"Resolver name to persisted entry"`
+	// Parameters stores the merged parameter set used for replay. On each run,
+	// CLI parameters are merged into this map (CLI wins on conflict, new keys added).
+	// When no CLI params are provided, these saved parameters drive replay.
+	Parameters map[string]any `json:"parameters" doc:"Merged parameter set for replay"`
+
+	// Immutables maps resolver names to locked values. Resolvers marked
+	// immutable: true have their resolved values saved here after first execution.
+	// Subsequent runs verify the resolver produces the same value.
+	Immutables map[string]*ImmutableEntry `json:"immutables" doc:"Locked resolver values"`
+
+	// Fingerprints stores file and input hashes for action up-to-date checks.
+	// Keys use the format "__fingerprint:<actionName>:<type>".
+	Fingerprints map[string]*FingerprintEntry `json:"fingerprints" doc:"Action fingerprint hashes"`
 }
 
 // Metadata identifies the solution and tracks state lifecycle timestamps.
@@ -96,31 +107,38 @@ type CommandInfo struct {
 	// Subcommand is the CLI subcommand used (e.g., "run solution").
 	Subcommand string `json:"subcommand" doc:"CLI subcommand used" maxLength:"100" example:"run solution"`
 
-	// Parameters are the key-value pairs from --parameter flags.
+	// Parameters are the key-value pairs from --parameter flags for the most recent run.
 	Parameters map[string]string `json:"parameters" doc:"Key-value pairs from --parameter flags"`
 }
 
-// Entry is a single persisted resolver value.
-type Entry struct {
-	// Value is the stored resolver value.
-	Value any `json:"value" doc:"Stored resolver value"`
+// ImmutableEntry is a locked resolver value persisted in state.
+type ImmutableEntry struct {
+	// Value is the locked resolver value.
+	Value any `json:"value" doc:"Locked resolver value"`
 
-	// Type is the resolver's declared type (string, int, float, bool, array, object, any).
+	// Type is the resolver's declared type.
 	Type string `json:"type" doc:"Resolver declared type" maxLength:"30" example:"string"`
 
-	// UpdatedAt is when this entry was last written.
-	UpdatedAt time.Time `json:"updatedAt" doc:"When this entry was last written"`
+	// CreatedAt is when the immutable value was first stored.
+	CreatedAt time.Time `json:"createdAt" doc:"When the value was first locked"`
+}
 
-	// Immutable indicates whether this entry is locked permanently. Once set, the
-	// value cannot be overwritten by subsequent runs.
-	Immutable bool `json:"immutable" doc:"Locked permanently after first write"`
+// FingerprintEntry stores a fingerprint hash for action up-to-date checks.
+type FingerprintEntry struct {
+	// Value is the stored hash string.
+	Value string `json:"value" doc:"Stored hash value"`
+
+	// UpdatedAt is when this fingerprint was last written.
+	UpdatedAt time.Time `json:"updatedAt" doc:"When this fingerprint was last written"`
 }
 
 // NewData returns an initialized empty StateData with the current schema version.
 func NewData() *Data {
 	return &Data{
 		SchemaVersion: SchemaVersionCurrent,
-		Values:        make(map[string]*Entry),
+		Parameters:    make(map[string]any),
+		Immutables:    make(map[string]*ImmutableEntry),
+		Fingerprints:  make(map[string]*FingerprintEntry),
 		Command: CommandInfo{
 			Parameters: make(map[string]string),
 		},

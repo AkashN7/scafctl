@@ -11,8 +11,8 @@ import (
 )
 
 func TestWithState_FromContext(t *testing.T) {
-	data := NewMockData("test-sol", "1.0.0", map[string]*Entry{
-		"key1": {Value: "val1", Type: "string"},
+	data := NewMockData("test-sol", "1.0.0", map[string]any{
+		"env": "prod",
 	})
 
 	ctx := WithState(context.Background(), data)
@@ -21,7 +21,7 @@ func TestWithState_FromContext(t *testing.T) {
 	assert.True(t, ok)
 	assert.Same(t, data, got)
 	assert.Equal(t, "test-sol", got.Metadata.Solution)
-	assert.Len(t, got.Values, 1)
+	assert.Len(t, got.Parameters, 1)
 }
 
 func TestFromContext_Missing(t *testing.T) {

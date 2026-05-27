@@ -7,7 +7,7 @@ import "time"
 
 // NewMockData creates a StateData populated with test data.
 // Use this in tests that need a pre-populated state.
-func NewMockData(solution, version string, values map[string]*Entry) *Data {
+func NewMockData(solution, version string, params map[string]any) *Data {
 	now := time.Now().UTC()
 	data := NewData()
 	data.Metadata = Metadata{
@@ -17,8 +17,8 @@ func NewMockData(solution, version string, values map[string]*Entry) *Data {
 		LastUpdatedAt:  now,
 		ScafctlVersion: "test",
 	}
-	if values != nil {
-		data.Values = values
+	if params != nil {
+		data.Parameters = params
 	}
 	return data
 }

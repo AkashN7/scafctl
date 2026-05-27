@@ -170,19 +170,12 @@ type Resolver struct {
 	// Timeout
 	Timeout *time.Duration `json:"timeout,omitempty" yaml:"timeout,omitempty" doc:"Maximum execution time (default: 30s)" example:"30s"`
 
-	// SaveToState marks this resolver's result for state persistence after execution.
-	// When true, the resolver's result is collected after all resolvers complete and
-	// flushed to the backend in a single save call. For 'run solution' and 'run action',
-	// state is saved after successful action execution. For 'run resolver', state is
-	// saved immediately after resolver execution. The resolver always executes its
-	// configured provider -- saveToState does not cause implicit reads from state.
-	SaveToState bool `json:"saveToState,omitempty" yaml:"saveToState,omitempty" doc:"Persist resolver result to state after execution" example:"true"`
-
-	// Immutable locks the state entry permanently after first write. On subsequent
-	// runs the resolver should read its value from the state provider -- attempts to
-	// overwrite an immutable entry with a different value will error. Only meaningful
-	// when SaveToState is also true.
-	Immutable bool `json:"immutable,omitempty" yaml:"immutable,omitempty" doc:"Lock state value permanently after first write (requires saveToState)" example:"true"`
+	// Immutable locks the resolver's value in state after first execution. On subsequent
+	// runs, the resolver still executes but its value is compared against the stored value.
+	// If the values differ, execution fails with an error. Use this for non-deterministic
+	// values (e.g., UUIDs) that must remain stable across runs. Requires the solution to
+	// have a state block configured and enabled.
+	Immutable bool `json:"immutable,omitempty" yaml:"immutable,omitempty" doc:"Lock resolver value in state after first execution" example:"true"`
 
 	// Phases
 	Resolve   *ResolvePhase   `json:"resolve" yaml:"resolve" doc:"Value resolution phase"`

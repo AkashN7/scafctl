@@ -23,12 +23,13 @@ func CommandSet(_ *settings.Run, _ *terminal.IOStreams, _ string) *cobra.Command
 		key       string
 		value     string
 		valueType string
+		immutable bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "set",
 		Short: "Set a state value",
-		Long:  "Set or update a value in a state file.",
+		Long:  "Set or update a value in a state file. Defaults to the parameters section. Use --immutable to set an immutable value.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			w := writer.FromContext(ctx)
@@ -43,23 +44,27 @@ func CommandSet(_ *settings.Run, _ *terminal.IOStreams, _ string) *cobra.Command
 				return exitcode.WithCode(err, exitcode.GeneralError)
 			}
 
-			// Check if entry is immutable
-			if existing, ok := sd.Values[key]; ok && existing.Immutable {
-				err := fmt.Errorf("key %q is immutable and cannot be modified", key)
-				w.Errorf("%v", err)
-				return exitcode.WithCode(err, exitcode.InvalidInput)
-			}
-
 			coerced, coerceErr := coerceValue(value, valueType)
 			if coerceErr != nil {
 				w.Errorf("%v", coerceErr)
 				return exitcode.WithCode(coerceErr, exitcode.InvalidInput)
 			}
 
-			sd.Values[key] = &state.Entry{
-				Value:     coerced,
-				Type:      valueType,
-				UpdatedAt: time.Now().UTC(),
+			// Block writes to keys that exist in immutables
+			if _, isImmutable := sd.Immutables[key]; isImmutable {
+				err := fmt.Errorf("key %q is immutable; use 'state delete --force --key %s' to remove it first", key, key)
+				w.Errorf("%v", err)
+				return exitcode.WithCode(err, exitcode.InvalidInput)
+			}
+
+			if immutable {
+				sd.Immutables[key] = &state.ImmutableEntry{
+					Value:     coerced,
+					Type:      valueType,
+					CreatedAt: time.Now().UTC(),
+				}
+			} else {
+				sd.Parameters[key] = coerced
 			}
 
 			if err := state.SaveToFile(path, sd); err != nil {
@@ -77,6 +82,7 @@ func CommandSet(_ *settings.Run, _ *terminal.IOStreams, _ string) *cobra.Command
 	cmd.Flags().StringVar(&key, "key", "", "Key to set")
 	cmd.Flags().StringVar(&value, "value", "", "Value to store")
 	cmd.Flags().StringVar(&valueType, "type", "string", "Value type (string, int, bool, etc.)")
+	cmd.Flags().BoolVar(&immutable, "immutable", false, "Store as an immutable value (cannot be overwritten)")
 	_ = cmd.MarkFlagRequired("path")
 	_ = cmd.MarkFlagRequired("key")
 	_ = cmd.MarkFlagRequired("value")

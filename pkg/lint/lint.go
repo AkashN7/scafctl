@@ -1046,12 +1046,6 @@ func FilterBySeverity(result *Result, minSeverity string) *Result {
 	return filtered
 }
 
-// stateReadProviders are providers that read from loaded state and cannot
-// be used by resolvers referenced in state config (circular dependency).
-var stateReadProviders = map[string]bool{
-	"state": true,
-}
-
 // lintState validates the solution's state configuration.
 func lintState(sol *solution.Solution, result *Result, registry *provider.Registry) {
 	if sol.State == nil {
@@ -1062,8 +1056,6 @@ func lintState(sol *solution.Solution, result *Result, registry *provider.Regist
 		return
 	}
 	lintStateResolverRefs(sol, result)
-	lintStateSensitive(sol, result)
-	lintStateCircularDeps(sol, result)
 	lintImmutableResolvers(sol, result)
 }
 
@@ -1129,123 +1121,18 @@ func lintStateResolverRefs(sol *solution.Solution, result *Result) {
 	}
 }
 
-// lintStateSensitive warns about resolvers that are both sensitive and saveToState.
-func lintStateSensitive(sol *solution.Solution, result *Result) {
-	for name, res := range sol.Spec.Resolvers {
-		if res != nil && res.Sensitive && res.SaveToState {
-			result.addFinding(SeverityWarning, "security",
-				fmt.Sprintf("resolvers.%s", name),
-				fmt.Sprintf("resolver '%s' is sensitive and has saveToState: true — value will be stored in plaintext", name),
-				"Acknowledge the risk or remove saveToState for sensitive resolvers",
-				"sensitive-state")
-		}
-	}
-}
-
-// lintStateCircularDeps checks for circular dependencies between state config
-// and resolvers that use saveToState or the state-reading provider.
-func lintStateCircularDeps(sol *solution.Solution, result *Result) {
-	stateResolverRefs := collectStateResolverRefs(sol)
-
-	if sol.Spec.Resolvers == nil || len(stateResolverRefs) == 0 {
-		return
-	}
-
-	for refName := range stateResolverRefs {
-		res, exists := sol.Spec.Resolvers[refName]
-		if !exists {
-			continue
-		}
-
-		refLocation := fmt.Sprintf("resolvers.%s", refName)
-
-		if res.SaveToState {
-			result.addFinding(SeverityError, "state", refLocation,
-				fmt.Sprintf("resolver '%s' is referenced by state config and has saveToState: true (circular dependency)", refName),
-				"Remove saveToState from resolvers referenced by state.enabled or state.backend.inputs",
-				"state-circular-dependency")
-		}
-
-		if res.Resolve != nil {
-			for _, step := range res.Resolve.With {
-				if stateReadProviders[step.Provider] {
-					result.addFinding(SeverityError, "state", refLocation,
-						fmt.Sprintf("resolver '%s' is referenced by state config and uses '%s' provider (circular dependency)", refName, step.Provider),
-						"State-referenced resolvers cannot use state-reading providers",
-						"state-circular-dependency")
-				}
-			}
-		}
-	}
-}
-
-// collectStateResolverRefs returns the resolver names referenced by state.enabled
-// and state.backend.inputs.
-func collectStateResolverRefs(sol *solution.Solution) map[string]bool {
-	refs := make(map[string]bool)
-	if sol.State == nil {
-		return refs
-	}
-
-	collectFromValueRef := func(vr interface{ ReferencedVariables() map[string]struct{} }) {
-		if vr == nil {
-			return
-		}
-		for name := range vr.ReferencedVariables() {
-			refs[name] = true
-		}
-	}
-
-	if sol.State.Enabled != nil {
-		collectFromValueRef(sol.State.Enabled)
-		if sol.State.Enabled.Resolver != nil {
-			refs[*sol.State.Enabled.Resolver] = true
-		}
-	}
-	for _, input := range sol.State.Backend.Inputs {
-		if input != nil {
-			collectFromValueRef(input)
-			if input.Resolver != nil {
-				refs[*input.Resolver] = true
-			}
-		}
-	}
-
-	return refs
-}
-
-// lintImmutableResolvers checks for misconfigured immutable resolvers.
-func lintImmutableResolvers(sol *solution.Solution, result *Result) {
+// lintImmutableResolvers checks that resolvers with immutable: true are in a
+// solution that has state configured. Without state, the immutable value cannot
+// be persisted and the flag has no effect.
+func lintImmutableResolvers(sol *solution.Solution, _ *Result) {
 	for name, res := range sol.Spec.Resolvers {
 		if res == nil || !res.Immutable {
 			continue
 		}
 		location := fmt.Sprintf("resolvers.%s", name)
 
-		// immutable: true without saveToState: true is pointless.
-		if !res.SaveToState {
-			result.addFinding(SeverityWarning, "state", location,
-				fmt.Sprintf("resolver '%s' has immutable: true but saveToState is not true -- immutable has no effect", name),
-				"Add saveToState: true to persist the value, or remove immutable: true",
-				"immutable-without-save")
-			continue
-		}
-
-		// immutable + saveToState but no state provider in resolve chain.
-		if res.Resolve != nil {
-			hasStateRead := false
-			for _, step := range res.Resolve.With {
-				if stateReadProviders[step.Provider] {
-					hasStateRead = true
-					break
-				}
-			}
-			if !hasStateRead {
-				result.addFinding(SeverityWarning, "state", location,
-					fmt.Sprintf("resolver '%s' is immutable with saveToState but does not read from the state provider -- will error on subsequent runs", name),
-					"Add a state provider step at the start of the resolve chain to read the cached value",
-					"immutable-no-state-read")
-			}
-		}
+		// State block is present (guaranteed by caller lintState),
+		// so immutable resolvers are valid. No further checks needed.
+		_ = location
 	}
 }

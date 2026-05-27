@@ -36,8 +36,14 @@ func LoadFromFile(path string) (*Data, error) {
 		return nil, fmt.Errorf("unmarshal state file: %w", err)
 	}
 
-	if sd.Values == nil {
-		sd.Values = make(map[string]*Entry)
+	if sd.Parameters == nil {
+		sd.Parameters = make(map[string]any)
+	}
+	if sd.Immutables == nil {
+		sd.Immutables = make(map[string]*ImmutableEntry)
+	}
+	if sd.Fingerprints == nil {
+		sd.Fingerprints = make(map[string]*FingerprintEntry)
 	}
 	if sd.Command.Parameters == nil {
 		sd.Command.Parameters = make(map[string]string)

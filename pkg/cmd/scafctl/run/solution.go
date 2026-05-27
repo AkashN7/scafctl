@@ -503,6 +503,7 @@ func (o *SolutionOptions) Run(ctx context.Context) error {
 			ctx = loadResult.Ctx
 			actionCtx = state.WithState(actionCtx, loadResult.Data)
 			stateData = loadResult.Data
+			params = loadResult.MergedParams
 		}
 	}
 
@@ -571,8 +572,8 @@ func (o *SolutionOptions) Run(ctx context.Context) error {
 		return o.exitWithCode(ctx, fmt.Errorf("action execution failed: %w", err), exitcode.ActionFailed)
 	}
 
-	// State lifecycle: save resolver values marked with saveToState after
-	// successful action execution.
+	// State lifecycle: save merged parameters and check immutable values
+	// after successful action execution.
 	if stateMgr != nil && stateData != nil {
 		solMeta := buildStateSolutionMeta(sol)
 		if saveErr := stateMgr.Save(ctx, stateData, resolverCtx, resolvers, params, resolverData, solMeta); saveErr != nil {

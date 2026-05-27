@@ -5,7 +5,7 @@ weight: 95
 
 # State Tutorial
 
-This tutorial walks you through using state persistence to retain resolver values across solution executions. You'll learn how to configure state, read from it on subsequent runs, and manage state files via the CLI.
+This tutorial walks you through using state persistence in scafctl. The state system automatically persists CLI parameters (`-r` values) across runs so that solutions can be replayed without re-providing inputs. You'll learn how parameter replay works, how to lock values with `immutable`, and how to manage state files via the CLI.
 
 ## Prerequisites
 
@@ -15,21 +15,39 @@ This tutorial walks you through using state persistence to retain resolver value
 
 ## Table of Contents
 
-1. [Your First Stateful Solution](#your-first-stateful-solution)
-2. [Reading from State on Subsequent Runs](#reading-from-state-on-subsequent-runs)
-3. [Dynamic State Paths](#dynamic-state-paths)
-4. [CLI Commands](#cli-commands)
-5. [Sensitive Values](#sensitive-values)
-6. [Common Patterns](#common-patterns)
-7. [Command Behavior](#command-behavior)
-8. [Concerns](#concerns)
-9. [Future Enhancements](#future-enhancements)
+1. [How State Works](#how-state-works)
+2. [Your First Stateful Solution](#your-first-stateful-solution)
+3. [Replaying from State](#replaying-from-state)
+4. [Parameter Merging](#parameter-merging)
+5. [Immutable Resolvers](#immutable-resolvers)
+6. [Dynamic State Paths](#dynamic-state-paths)
+7. [CLI Commands](#cli-commands)
+8. [Command Behavior](#command-behavior)
+9. [Common Patterns](#common-patterns)
+
+---
+
+## How State Works
+
+The state system is built on a simple principle: **CLI parameters are the backbone of replay**.
+
+When state is enabled and you run a solution with `-r key=value` flags, those parameters are automatically persisted to the state file. On subsequent runs, saved parameters are merged with any new CLI parameters (CLI wins on conflict), so the solution replays with the same inputs without you having to re-provide them.
+
+This eliminates the need to manually configure which resolver values to save. Every parameter you pass is remembered.
+
+The state file stores three things:
+
+| Section | Purpose |
+|---------|---------|
+| `parameters` | Merged set of all CLI parameters across runs (drives replay) |
+| `immutables` | Locked resolver values that must not change between runs |
+| `fingerprints` | Action file hashes for up-to-date checks |
 
 ---
 
 ## Your First Stateful Solution
 
-Let's create a solution that saves resolver values to a local state file so they persist between runs.
+Let's create a solution that remembers your inputs across runs.
 
 ### Step 1: Create the Solution File
 
@@ -53,7 +71,6 @@ spec:
   resolvers:
     username:
       type: string
-      saveToState: true
       resolve:
         with:
           - provider: parameter
@@ -62,7 +79,6 @@ spec:
 
     region:
       type: string
-      saveToState: true
       resolve:
         with:
           - provider: parameter
@@ -95,32 +111,126 @@ username: alice
 region: eu-west-1
 ```
 
-The values are now saved to `~/.local/state/scafctl/state-demo.json`.
+The parameters `username=alice` and `region=eu-west-1` are now saved to `~/.local/state/scafctl/state-demo.json`.
 
 ### Understanding the Structure
 
 - **state.enabled** -- Activates state persistence. Can be a literal `true`, a CEL expression, or template. Because state is loaded before resolvers run, resolver references (`rslvr:...`) are not supported here.
 - **state.backend.provider** -- The provider that handles persistence. Use `file` for local files.
 - **state.backend.inputs.path** -- Where to store the state file, relative to the XDG state directory (`~/.local/state/scafctl/` on macOS/Linux).
-- **saveToState: true** -- Marks a resolver's output for persistence after execution completes.
 
-All `saveToState` values are collected after resolvers complete, then flushed to the backend in a single save call. This ensures no partial state on failures.
+No per-resolver configuration is needed. All CLI parameters are persisted automatically when state is enabled.
 
 ---
 
-## Reading from State on Subsequent Runs
+## Replaying from State
 
-Now let's add the `state` provider so values are read from state on subsequent runs instead of requiring parameters again.
+On subsequent runs, saved parameters are automatically injected as if you had passed them via `-r`. The `parameter` provider sees them without any extra configuration.
+
+### Step 1: Second Run (No Parameters Needed)
+
+{{< tabs "state-tutorial-cmd-2" >}}
+{{% tab "Bash" %}}
+```bash
+scafctl run resolver -f state-demo.yaml
+```
+{{% /tab %}}
+{{% tab "PowerShell" %}}
+```powershell
+scafctl run resolver -f state-demo.yaml
+```
+{{% /tab %}}
+{{< /tabs >}}
+
+Output:
+
+```
+username: alice
+region: eu-west-1
+```
+
+Both values come from the saved parameters in state. No re-prompting needed.
+
+### How It Works
+
+1. State file is loaded before resolver execution.
+2. Saved parameters are merged with CLI parameters (CLI wins on conflict).
+3. The merged parameter set is made available to resolvers via the `parameter` provider.
+4. After execution, the merged parameters are saved back to state.
+
+This means the `parameter` provider seamlessly reads from state on repeat runs -- no fallback chains or special configuration required.
+
+---
+
+## Parameter Merging
+
+Parameters accumulate across runs. New keys are added, existing keys are overwritten by CLI values.
+
+### Example: Gradual Parameter Building
+
+{{< tabs "state-tutorial-cmd-3" >}}
+{{% tab "Bash" %}}
+```bash
+# First run: set username and region
+scafctl run resolver -f state-demo.yaml -r username=alice -r region=eu-west-1
+
+# Second run: override region, add a new parameter
+scafctl run resolver -f state-demo.yaml -r region=us-west-2 -r team=platform
+```
+{{% /tab %}}
+{{% tab "PowerShell" %}}
+```powershell
+# First run: set username and region
+scafctl run resolver -f state-demo.yaml -r username=alice -r region=eu-west-1
+
+# Second run: override region, add a new parameter
+scafctl run resolver -f state-demo.yaml -r region=us-west-2 -r team=platform
+```
+{{% /tab %}}
+{{< /tabs >}}
+
+After the second run, the state file contains:
+
+```json
+{
+  "parameters": {
+    "username": "alice",
+    "region": "us-west-2",
+    "team": "platform"
+  }
+}
+```
+
+- `username` was preserved from the first run (not provided again).
+- `region` was overwritten by the CLI value.
+- `team` was added as a new key.
+
+### Merge Rules
+
+| Scenario | Behavior |
+|----------|----------|
+| Key in state, not in CLI | Preserved from state |
+| Key in both state and CLI | CLI value wins |
+| Key in CLI, not in state | Added to state |
+| No CLI parameters | All saved parameters used as-is |
+
+---
+
+## Immutable Resolvers
+
+Mark a resolver as `immutable: true` to lock its resolved value in state after first execution. On subsequent runs, the resolver must produce the same value or execution fails.
+
+This is useful for values that must never change once established (e.g., resource IDs, project names used in infrastructure).
 
 ### Step 1: Create the Solution File
 
-Create a file called `state-fallback.yaml`:
+Create a file called `state-immutable.yaml`:
 
 ```yaml
 apiVersion: scafctl.io/v1
 kind: Solution
 metadata:
-  name: state-fallback
+  name: state-immutable
   version: 1.0.0
 
 state:
@@ -128,32 +238,23 @@ state:
   backend:
     provider: file
     inputs:
-      path: "state-fallback.json"
+      path: "state-immutable.json"
 
 spec:
   resolvers:
-    username:
+    project_id:
       type: string
-      saveToState: true
+      immutable: true
       resolve:
         with:
-          - provider: state
-            inputs:
-              key: "username"
-              required: false
           - provider: parameter
             inputs:
-              key: "username"
+              key: "project_id"
 
     region:
       type: string
-      saveToState: true
       resolve:
         with:
-          - provider: state
-            inputs:
-              key: "region"
-              required: false
           - provider: parameter
             inputs:
               key: "region"
@@ -162,23 +263,17 @@ spec:
               value: "us-east-1"
 ```
 
-The resolver fallback chain makes this work:
+### Step 2: First Run
 
-1. On first run, `state` returns `ErrKeyNotFound` (no state file exists), so the resolver falls through to `parameter` via `onError: continue`.
-2. After execution, the result is saved to state via `saveToState: true`.
-3. On subsequent runs, `state` returns the cached value and the chain stops.
-
-### Step 2: First Run (Provide Parameters)
-
-{{< tabs "state-tutorial-cmd-2" >}}
+{{< tabs "state-tutorial-cmd-4" >}}
 {{% tab "Bash" %}}
 ```bash
-scafctl run resolver -f state-fallback.yaml -r username=alice -r region=eu-west-1
+scafctl run resolver -f state-immutable.yaml -r project_id=proj-abc123 -r region=eu-west-1
 ```
 {{% /tab %}}
 {{% tab "PowerShell" %}}
 ```powershell
-scafctl run resolver -f state-fallback.yaml -r username=alice -r region=eu-west-1
+scafctl run resolver -f state-immutable.yaml -r project_id=proj-abc123 -r region=eu-west-1
 ```
 {{% /tab %}}
 {{< /tabs >}}
@@ -186,21 +281,23 @@ scafctl run resolver -f state-fallback.yaml -r username=alice -r region=eu-west-
 Output:
 
 ```
-username: alice
+project_id: proj-abc123
 region: eu-west-1
 ```
 
-### Step 3: Second Run (Values Come from State)
+The value `proj-abc123` is now locked in the `immutables` section of state.
 
-{{< tabs "state-tutorial-cmd-3" >}}
+### Step 3: Attempt to Change (Fails)
+
+{{< tabs "state-tutorial-cmd-5" >}}
 {{% tab "Bash" %}}
 ```bash
-scafctl run resolver -f state-fallback.yaml
+scafctl run resolver -f state-immutable.yaml -r project_id=proj-xyz789
 ```
 {{% /tab %}}
 {{% tab "PowerShell" %}}
 ```powershell
-scafctl run resolver -f state-fallback.yaml
+scafctl run resolver -f state-immutable.yaml -r project_id=proj-xyz789
 ```
 {{% /tab %}}
 {{< /tabs >}}
@@ -208,19 +305,48 @@ scafctl run resolver -f state-fallback.yaml
 Output:
 
 ```
-username: alice
-region: eu-west-1
+Error: immutable entry "project_id": resolved value differs from locked value; use 'scafctl state delete' to remove it first
 ```
 
-Both values are read from state. No re-prompting needed.
+### Step 4: Unlocking an Immutable Value
 
-### State Provider Inputs
+To change an immutable value, explicitly delete it from state first:
 
-| Input | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `key` | string | Yes | -- | State entry key (typically a resolver name) |
-| `required` | bool | No | `false` | Error when key is not found |
-| `fallback` | any | No | -- | Value when key is not found and `required` is `false` |
+{{< tabs "state-tutorial-cmd-6" >}}
+{{% tab "Bash" %}}
+```bash
+scafctl state delete --path state-immutable.json --key project_id --immutable
+scafctl run resolver -f state-immutable.yaml -r project_id=proj-xyz789
+```
+{{% /tab %}}
+{{% tab "PowerShell" %}}
+```powershell
+scafctl state delete --path state-immutable.json --key project_id --immutable
+scafctl run resolver -f state-immutable.yaml -r project_id=proj-xyz789
+```
+{{% /tab %}}
+{{< /tabs >}}
+
+### State File Structure with Immutables
+
+```json
+{
+  "schemaVersion": 1,
+  "parameters": {
+    "project_id": "proj-abc123",
+    "region": "eu-west-1"
+  },
+  "immutables": {
+    "project_id": {
+      "value": "proj-abc123",
+      "type": "string",
+      "createdAt": "2026-01-15T10:00:00Z"
+    }
+  }
+}
+```
+
+Note that `project_id` appears in both `parameters` (for replay) and `immutables` (for change detection). They serve different purposes: `parameters` drives replay input, `immutables` enforces value consistency.
 
 ---
 
@@ -251,13 +377,8 @@ spec:
   resolvers:
     region:
       type: string
-      saveToState: true
       resolve:
         with:
-          - provider: state
-            inputs:
-              key: "region"
-              required: false
           - provider: parameter
             inputs:
               key: "region"
@@ -268,7 +389,7 @@ spec:
 
 ### Step 2: Run with Different Projects
 
-{{< tabs "state-tutorial-cmd-4" >}}
+{{< tabs "state-tutorial-cmd-7" >}}
 {{% tab "Bash" %}}
 ```bash
 scafctl run resolver -f state-dynamic.yaml -r project=frontend -r region=us-west-2
@@ -283,7 +404,7 @@ scafctl run resolver -f state-dynamic.yaml -r project=backend -r region=eu-west-
 {{% /tab %}}
 {{< /tabs >}}
 
-Each project gets its own state file:
+Each project gets its own state file with its own parameter history:
 
 ```
 ~/.local/state/scafctl/deploy/frontend.json
@@ -296,77 +417,85 @@ Each project gets its own state file:
 
 The `scafctl state` command group lets you inspect and modify state files directly.
 
-### Step 1: List Keys
-
-{{< tabs "state-tutorial-cmd-5" >}}
-{{% tab "Bash" %}}
-```bash
-scafctl state list --path state-fallback.json
-```
-{{% /tab %}}
-{{% tab "PowerShell" %}}
-```powershell
-scafctl state list --path state-fallback.json
-```
-{{% /tab %}}
-{{< /tabs >}}
-
-### Step 2: Get a Value
-
-{{< tabs "state-tutorial-cmd-6" >}}
-{{% tab "Bash" %}}
-```bash
-scafctl state get --path state-fallback.json --key username
-```
-{{% /tab %}}
-{{% tab "PowerShell" %}}
-```powershell
-scafctl state get --path state-fallback.json --key username
-```
-{{% /tab %}}
-{{< /tabs >}}
-
-### Step 3: Set a Value Manually
-
-{{< tabs "state-tutorial-cmd-7" >}}
-{{% tab "Bash" %}}
-```bash
-scafctl state set --path state-fallback.json --key username --value bob
-```
-{{% /tab %}}
-{{% tab "PowerShell" %}}
-```powershell
-scafctl state set --path state-fallback.json --key username --value bob
-```
-{{% /tab %}}
-{{< /tabs >}}
-
-### Step 4: Delete a Key
+### List Keys
 
 {{< tabs "state-tutorial-cmd-8" >}}
 {{% tab "Bash" %}}
 ```bash
-scafctl state delete --path state-fallback.json --key username
+scafctl state list --path state-demo.json
 ```
 {{% /tab %}}
 {{% tab "PowerShell" %}}
 ```powershell
-scafctl state delete --path state-fallback.json --key username
+scafctl state list --path state-demo.json
 ```
 {{% /tab %}}
 {{< /tabs >}}
 
-### Step 5: Clear All Values
+### Get a Parameter Value
 
 {{< tabs "state-tutorial-cmd-9" >}}
 {{% tab "Bash" %}}
 ```bash
-scafctl state clear --path state-fallback.json
+scafctl state get --path state-demo.json --key username
 ```
 {{% /tab %}}
 {{% tab "PowerShell" %}}
 ```powershell
-scafctl state clear --path state-fallback.json
+scafctl state get --path state-demo.json --key username
+```
+{{% /tab %}}
+{{< /tabs >}}
+
+### Set a Parameter Value Manually
+
+{{< tabs "state-tutorial-cmd-10" >}}
+{{% tab "Bash" %}}
+```bash
+scafctl state set --path state-demo.json --key username --value bob
+```
+{{% /tab %}}
+{{% tab "PowerShell" %}}
+```powershell
+scafctl state set --path state-demo.json --key username --value bob
+```
+{{% /tab %}}
+{{< /tabs >}}
+
+### Delete a Key
+
+{{< tabs "state-tutorial-cmd-11" >}}
+{{% tab "Bash" %}}
+```bash
+# Delete a parameter
+scafctl state delete --path state-demo.json --key username
+
+# Delete an immutable value
+scafctl state delete --path state-demo.json --key project_id --immutable
+```
+{{% /tab %}}
+{{% tab "PowerShell" %}}
+```powershell
+# Delete a parameter
+scafctl state delete --path state-demo.json --key username
+
+# Delete an immutable value
+scafctl state delete --path state-demo.json --key project_id --immutable
+```
+{{% /tab %}}
+{{< /tabs >}}
+
+### Clear All Values
+
+{{< tabs "state-tutorial-cmd-12" >}}
+{{% tab "Bash" %}}
+```bash
+scafctl state clear --path state-demo.json
+```
+{{% /tab %}}
+{{% tab "PowerShell" %}}
+```powershell
+scafctl state clear --path state-demo.json
 ```
 {{% /tab %}}
 {{< /tabs >}}
@@ -376,92 +505,57 @@ scafctl state clear --path state-fallback.json
 
 ---
 
-## Sensitive Values
+## Command Behavior
 
-When a resolver is marked `sensitive: true` and `saveToState: true`, the value is stored **in plaintext** in the state file. A lint warning is emitted to alert the solution author.
+State behavior varies across the commands that support it.
 
-### Step 1: Create the Solution File
+### `run resolver`
 
-Create a file called `state-sensitive.yaml`:
+Loads state before resolvers execute and **saves state immediately after resolvers complete**.
 
-```yaml
-apiVersion: scafctl.io/v1
-kind: Solution
-metadata:
-  name: state-sensitive
-  version: 1.0.0
+- Saved parameters are merged with CLI parameters before execution
+- Resolvers execute using the merged parameter set
+- After all resolvers succeed, the merged parameters are persisted
+- Immutable checks run after resolver execution
+- If any resolver fails, state is NOT saved (no partial state)
 
-state:
-  enabled: true
-  backend:
-    provider: file
-    inputs:
-      path: "state-sensitive.json"
+This is the simplest state lifecycle -- load, merge, resolve, save.
 
-spec:
-  resolvers:
-    api_key:
-      type: string
-      sensitive: true
-      saveToState: true
-      resolve:
-        with:
-          - provider: state
-            inputs:
-              key: "api_key"
-              required: false
-          - provider: parameter
-            inputs:
-              key: "API Key"
-```
+### `run solution` and `run action`
 
-### Step 2: Run the Linter
+Loads state before resolvers execute but **saves state only after actions complete successfully**.
 
-{{< tabs "state-tutorial-cmd-10" >}}
-{{% tab "Bash" %}}
-```bash
-scafctl lint -f state-sensitive.yaml
-```
-{{% /tab %}}
-{{% tab "PowerShell" %}}
-```powershell
-scafctl lint -f state-sensitive.yaml
-```
-{{% /tab %}}
-{{< /tabs >}}
+- Saved parameters merged with CLI parameters (same as `run resolver`)
+- Resolvers execute using merged parameters
+- Actions execute using resolver data
+- State is saved only after successful action execution
+- If actions fail, state is NOT saved -- even if resolvers succeeded
 
-Output:
+This ensures state reflects only fully successful executions.
 
-```
-WARNING [state-sensitive-value] Sensitive resolver "api_key" with saveToState will be stored in plaintext
-```
+### `render solution`
 
-This is an explicit, informed decision. Encryption is not used because the validation application running on a separate machine would not have access to decryption keys.
+Loads state (read-only) but **never saves state**.
+
+- Saved parameters are merged with CLI parameters
+- Resolvers execute using merged parameters
+- The action graph is rendered (not executed) using resolved values
+- State is NEVER written -- render is a read-only operation
+
+Use `render solution` to preview what an action graph would look like with current state values, without modifying state.
+
+### Summary Table
+
+| Command | Loads State | Saves State | Save Trigger |
+|---------|-------------|-------------|--------------|
+| `run resolver` | Yes | Yes | After resolvers complete |
+| `run solution` | Yes | Yes | After actions succeed |
+| `run action` | Yes | Yes | After actions succeed |
+| `render solution` | Yes | No (read-only) | -- |
 
 ---
 
 ## Common Patterns
-
-### Cache expensive API calls
-
-```yaml
-resolvers:
-  auth_token:
-    type: string
-    saveToState: true
-    resolve:
-      with:
-        - provider: state
-          inputs:
-            key: "auth_token"
-            required: false
-        - provider: http
-          inputs:
-            url: "https://auth.example.com/token"
-            method: POST
-```
-
-On first run, the HTTP call fetches the token. On subsequent runs, it comes from state.
 
 ### Dynamic state activation
 
@@ -477,155 +571,56 @@ state:
 
 State is only active when the `enable_state` CLI parameter is set to `true` (e.g., `-r enable_state=true`).
 
-### Writing state from actions
+### Replay in CI validation
 
-```yaml
-workflow:
-  actions:
-    - name: save-deployment-id
-      provider: state
-      inputs:
-        key: "deployment_id"
-        value:
-          rslvr: deployment_result
+A CI validator can replay a solution using the state file committed alongside generated code:
+
+```bash
+# Replay using the state file from the PR (parameters are loaded automatically)
+scafctl run solution -f app-registration.yaml --state-file ./apps/my-app/state.json
 ```
 
-Actions can explicitly write values to state using the `state` provider with `action` capability.
+Because all CLI parameters are persisted in state, the solution replays deterministically without any `-r` flags. The validator can then diff the output against the PR contents.
 
----
-
-## Command Behavior
-
-State behavior varies across the three commands that support it. Understanding these differences is important for building correct stateful solutions.
-
-### `run resolver`
-
-Loads state before resolvers execute and **saves state immediately after resolvers complete**.
-
-- State is loaded before resolver execution
-- Resolvers with `saveToState: true` have their values persisted after all resolvers succeed
-- If any resolver fails, state is NOT saved (no partial state)
-- The `command.subcommand` field in state is recorded as `"run resolver"`
-
-This is the simplest state lifecycle -- load, resolve, save.
-
-### `run solution` and `run action`
-
-Loads state before resolvers execute but **saves state only after actions complete successfully**.
-
-- State is loaded before resolver execution (same as `run resolver`)
-- Resolvers execute and produce values
-- Actions execute using resolver data
-- State is saved only after successful action execution
-- If actions fail, state is NOT saved -- even if resolvers succeeded
-- `run action` filters to specific actions (plus transitive dependencies) but follows the same state lifecycle as `run solution`
-- The `command.subcommand` field is recorded as `"run solution"` or `"run action"`
-
-This means: if you run a solution with actions and an action fails, the resolver values are not persisted to state. This is intentional -- it ensures state reflects only fully successful executions.
-
-### `render solution`
-
-Loads state (read-only) but **never saves state**.
-
-- State is loaded before resolver execution
-- The state provider can read previously cached values
-- Resolvers execute using state context
-- The action graph is rendered (not executed) using resolved values
-- State is NEVER written -- render is a read-only operation
-- The `command.subcommand` field passed to state load is `"render solution"`
-
-Use `render solution` to preview what an action graph would look like with current state values, without modifying state.
-
-### Summary Table
-
-| Command | Loads State | Saves State | Save Trigger |
-|---------|-------------|-------------|--------------|
-| `run resolver` | Yes | Yes | After resolvers complete |
-| `run solution` | Yes | Yes | After actions succeed |
-| `run action` | Yes | Yes | After actions succeed |
-| `render solution` | Yes | No (read-only) | -- |
-
-### Resolver Chain Pattern for Parameter Override
-
-When you want CLI parameters to override cached state values, place the `parameter` provider **before** the `state` provider in the resolve chain:
+### Immutable infrastructure identifiers
 
 ```yaml
 resolvers:
-  environment:
+  resource_group:
     type: string
-    saveToState: true
+    immutable: true
     resolve:
       with:
-        - provider: parameter      # wins if -r env=value is passed
+        - provider: parameter
           inputs:
-            key: "env"
-        - provider: state           # wins on repeat runs (no param)
+            key: "resource_group"
+
+  subscription_id:
+    type: string
+    immutable: true
+    resolve:
+      with:
+        - provider: parameter
           inputs:
-            key: "environment"
-            required: true
-        - provider: static          # default on first run (no state)
-          inputs:
-            value: "dev"
+            key: "subscription_id"
 ```
 
-The fallback chain uses `onError: continue` (the default) so each provider that fails simply falls through to the next.
+These values are locked after first execution. If someone accidentally passes a different `resource_group` on a subsequent run, the execution fails rather than silently deploying to the wrong resource group.
 
----
-
-## Concerns
-
-### Replay and Validation Workflows
-
-A common pattern in scaffolding frameworks is a **validation layer** that replays a previously executed solution to verify that the generated output matches what a user committed. For example, a CI validator might:
-
-1. Read the state file from a pull request
-2. Re-run the solution using that state
-3. Verify the generated files match the PR contents
-
-This pattern works because the resolver fallback chain reads cached values from `state.values` without needing any CLI parameters. However, there are important limitations and design considerations.
-
-### The `command.parameters` Field Is Informational Only
-
-The `command` field in state (`command.subcommand` and `command.parameters`) records the most recent invocation's CLI parameters. However:
-
-- It is **never read back** by scafctl during execution -- it is purely metadata
-- It uses **last-write-wins** semantics -- only the most recent invocation is stored, with no history
-- Parameters are **string-coerced** via `fmt.Sprintf("%v", v)`, which is lossy for complex types
-- Running different commands (e.g., `run resolver` then `run action`) overwrites the record entirely
-
-This means `command.parameters` cannot be used as a reliable replay mechanism. The actual "replay" in scafctl happens through `state.values` and the resolver fallback chain.
-
-### State Completeness for Replay
-
-For replay to produce deterministic output, **every resolver whose value affects the generated files** must either:
-
-1. Be saved to state (`saveToState: true`), OR
-2. Be deterministically derivable from other saved resolvers (computed/transformed values)
-
-Resolvers that are NOT saved to state will have no value during replay unless they can resolve from a non-interactive provider (e.g., `static`, `exec`, or another deterministic source). If a resolver falls through to `parameter` and no parameter is provided, it will fail.
-
-This creates a tension: some values may be intentionally re-prompted for safety (e.g., target environment confirmation), but excluding them from state breaks deterministic replay.
-
-**Guideline**: For solutions that require validation replay, all resolvers contributing to output must be `saveToState: true`. Safety concerns (like confirming dangerous operations) should be handled through separate mechanisms -- `when` conditions on actions, lint rules, or CI policy checks -- rather than by omitting values from state.
-
-### Derived Values Are Safe to Exclude
-
-Resolvers whose values are purely computed from other resolvers do not need `saveToState: true`:
+### Combining parameters with computed values
 
 ```yaml
 resolvers:
   base_url:
     type: string
-    saveToState: true
     resolve:
       with:
-        - provider: state
-          inputs: { key: "base_url", required: false }
         - provider: parameter
-          inputs: { key: "base_url" }
+          inputs:
+            key: "base_url"
 
   api_endpoint:
-    # Derived from base_url -- no need to save
+    # Derived from base_url -- computed fresh each run
     type: string
     resolve:
       with:
@@ -640,86 +635,4 @@ resolvers:
             expression: '__self + "/api/v2"'
 ```
 
-On replay, `base_url` comes from state, and `api_endpoint` is recomputed identically.
-
-### Volatile Values and Replay
-
-Values that change between runs (auth tokens, timestamps, git branch) pose a challenge:
-
-- If saved to state, replay uses the stale cached value (which may be what you want for determinism)
-- If not saved, replay must obtain a fresh value (which may differ from the original run)
-
-For validation workflows, stale-but-deterministic is usually preferable to fresh-but-different.
-
----
-
-## Future Enhancements
-
-The following are potential improvements to address the concerns above. These are not yet implemented.
-
-### Replay Command
-
-A dedicated `scafctl state replay` command that re-executes a solution using only state values, failing fast if any resolver cannot resolve without interactive input. This would formalize the validation workflow:
-
-```bash
-# Hypothetical: replay using state file, output to temp dir for diffing
-scafctl state replay -f app-registration.yaml --state-path ./state.json --output-dir /tmp/validate
-```
-
-### Parameter Accumulation in State
-
-Instead of last-write-wins for `command.parameters`, accumulate all parameters ever passed across runs. This would make the command field a more complete audit trail:
-
-```json
-{
-  "command": {
-    "subcommand": "run solution",
-    "parameters": {
-      "app_name": "my-app",
-      "admin_group": "new-admins",
-      "region": "us-east-1"
-    },
-    "parameterHistory": [
-      {"timestamp": "2026-01-15T10:00:00Z", "parameters": {"app_name": "my-app", "region": "us-east-1"}},
-      {"timestamp": "2026-03-20T14:30:00Z", "parameters": {"admin_group": "new-admins"}}
-    ]
-  }
-}
-```
-
-### State Completeness Lint Rule
-
-A lint rule that warns when a solution has `state.enabled: true` but has resolvers without `saveToState: true` that are not provably derived from other saved resolvers. This would catch replay gaps at authoring time rather than at validation time.
-
-### Explicit State File Path Override
-
-A CLI flag to point the state backend at an arbitrary file path, making it easier for validators to use a state file from a PR checkout without copying it to the XDG state directory:
-
-```bash
-# Hypothetical: override state path for validation
-scafctl run solution -f app-registration.yaml --state-file ./apps/my-app/state.json
-```
-
-### Resolver Tagging for Replay Scope
-
-A mechanism to tag resolvers as "replay-required" vs "ephemeral", allowing the replay command to distinguish between resolvers that must come from state and resolvers that are expected to be re-derived:
-
-```yaml
-resolvers:
-  admin_group:
-    saveToState: true
-    replayScope: required    # must be in state for replay to succeed
-
-  auth_token:
-    saveToState: false
-    replayScope: ephemeral   # re-derived on every run, not needed for replay
-```
-
-### Render-Based Validation Mode
-
-A `render solution` enhancement that outputs the file tree that actions *would* produce (without executing them), enabling validators to diff against PR contents without any side effects:
-
-```bash
-# Hypothetical: render file tree to directory for comparison
-scafctl render solution -f app-registration.yaml --output-dir /tmp/validate --state-file ./state.json
-```
+On replay, `base_url` comes from saved parameters, and `api_endpoint` is recomputed identically. Computed resolvers do not need any special configuration -- they derive from the persisted parameters naturally.

@@ -19,26 +19,35 @@ state:
 
 spec:
   resolvers:
-    config_value:
-      description: A value saved to project-specific state file
+    project:
+      description: Project name used for dynamic state path isolation
       type: string
-      saveToState: true
       resolve:
         with:
-          - provider: state
-            onError: continue
+          - provider: parameter
+            inputs:
+              key: "project"
+          - provider: static
+            inputs:
+              value: "default-project"
+
+    config_value:
+      description: A value resolved from parameter or default
+      type: string
+      resolve:
+        with:
+          - provider: parameter
             inputs:
               key: "config_value"
-              required: true
           - provider: static
             inputs:
               value: "default-config"
 
   testing:
     config:
-      # resolve-defaults: resolvers depend on state context
       # render-defaults: solution has no workflow.actions section
-      skipBuiltins: [resolve-defaults, render-defaults]
+      # resolve-defaults: dynamic state path requires __params.project
+      skipBuiltins: [render-defaults, resolve-defaults]
 
     cases:
       # =====================================================================
@@ -73,14 +82,14 @@ spec:
         init:
           - command: "rm -rf /tmp/scafctl-it-state-dynpath-preseeded && mkdir -p /tmp/scafctl-it-state-dynpath-preseeded/scafctl/dynamic"
           - command: >-
-              printf '{"schemaVersion":1,"metadata":{"solution":"test-state-dynamic-path","version":"1.0.0","createdAt":"2025-01-01T00:00:00Z","lastUpdatedAt":"2025-01-01T00:00:00Z","scafctlVersion":"dev"},"command":{"subcommand":"run resolver","parameters":{}},"values":{"config_value":{"value":"beta-config","type":"string","updatedAt":"2025-01-01T00:00:00Z","immutable":false}}}'
+              printf '{"schemaVersion":1,"metadata":{"solution":"test-state-dynamic-path","version":"1.0.0","createdAt":"2025-01-01T00:00:00Z","lastUpdatedAt":"2025-01-01T00:00:00Z","scafctlVersion":"dev"},"command":{"subcommand":"run resolver","parameters":{}},"parameters":{"config_value":"beta-config"},"immutables":{},"fingerprints":{}}'
               > /tmp/scafctl-it-state-dynpath-preseeded/scafctl/dynamic/beta.json
         cleanup:
           - command: "rm -rf /tmp/scafctl-it-state-dynpath-preseeded"
         assertions:
           - expression: __exitCode == 0
           - expression: __output.config_value == "beta-config"
-            message: "State provider should read from template-derived path"
+            message: "Parameter provider should read from template-derived state path"
 
       # =====================================================================
       # Different project param uses different state file (isolation)
@@ -96,11 +105,11 @@ spec:
           - command: "rm -rf /tmp/scafctl-it-state-dynpath-iso && mkdir -p /tmp/scafctl-it-state-dynpath-iso/scafctl/dynamic"
           # Pre-seed for project "beta" only
           - command: >-
-              printf '{"schemaVersion":1,"metadata":{"solution":"test-state-dynamic-path","version":"1.0.0","createdAt":"2025-01-01T00:00:00Z","lastUpdatedAt":"2025-01-01T00:00:00Z","scafctlVersion":"dev"},"command":{"subcommand":"run resolver","parameters":{}},"values":{"config_value":{"value":"beta-only","type":"string","updatedAt":"2025-01-01T00:00:00Z","immutable":false}}}'
+              printf '{"schemaVersion":1,"metadata":{"solution":"test-state-dynamic-path","version":"1.0.0","createdAt":"2025-01-01T00:00:00Z","lastUpdatedAt":"2025-01-01T00:00:00Z","scafctlVersion":"dev"},"command":{"subcommand":"run resolver","parameters":{}},"parameters":{"config_value":"beta-only"},"immutables":{},"fingerprints":{}}'
               > /tmp/scafctl-it-state-dynpath-iso/scafctl/dynamic/beta.json
         cleanup:
           - command: "rm -rf /tmp/scafctl-it-state-dynpath-iso"
         assertions:
           - expression: __exitCode == 0
           - expression: __output.config_value == "default-config"
-            message: "Project gamma should not see beta's state (different path)"
+            message: "Gamma project should not see beta's state file"

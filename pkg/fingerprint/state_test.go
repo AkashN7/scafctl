@@ -5,6 +5,7 @@ package fingerprint
 
 import (
 	"testing"
+	"time"
 
 	"github.com/oakwood-commons/scafctl/pkg/state"
 	"github.com/stretchr/testify/assert"
@@ -37,7 +38,7 @@ func TestLoadSourcesHash(t *testing.T) {
 	t.Run("existing key returns value", func(t *testing.T) {
 		t.Parallel()
 		data := state.NewData()
-		data.Values["__fingerprint:build:sources"] = &state.Entry{Value: "abc123"}
+		data.Fingerprints["__fingerprint:build:sources"] = &state.FingerprintEntry{Value: "abc123", UpdatedAt: time.Now().UTC()}
 		assert.Equal(t, "abc123", LoadSourcesHash(data, "build"))
 	})
 }
@@ -53,7 +54,7 @@ func TestLoadGeneratesHash(t *testing.T) {
 	t.Run("existing key returns value", func(t *testing.T) {
 		t.Parallel()
 		data := state.NewData()
-		data.Values["__fingerprint:build:generates"] = &state.Entry{Value: "def456"}
+		data.Fingerprints["__fingerprint:build:generates"] = &state.FingerprintEntry{Value: "def456", UpdatedAt: time.Now().UTC()}
 		assert.Equal(t, "def456", LoadGeneratesHash(data, "build"))
 	})
 }
@@ -131,7 +132,7 @@ func TestLoadInputsHash(t *testing.T) {
 	t.Run("existing key returns value", func(t *testing.T) {
 		t.Parallel()
 		data := state.NewData()
-		data.Values["__fingerprint:build:inputs"] = &state.Entry{Value: "inp789"}
+		data.Fingerprints["__fingerprint:build:inputs"] = &state.FingerprintEntry{Value: "inp789", UpdatedAt: time.Now().UTC()}
 		assert.Equal(t, "inp789", LoadInputsHash(data, "build"))
 	})
 }
