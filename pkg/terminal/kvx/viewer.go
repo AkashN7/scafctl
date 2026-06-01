@@ -110,6 +110,11 @@ type ViewerOptions struct {
 	// When set, the TUI renders arrays as a scrollable card list with sectioned
 	// detail views instead of the default KEY/VALUE table.
 	DisplaySchemaJSON []byte `json:"-" yaml:"-" doc:"JSON Schema with x-kvx-* extensions for rich TUI rendering"`
+
+	// ColumnarMode controls when arrays of objects render as multi-column tables.
+	// Valid values: "auto" (default), "always", "never".
+	// Use "always" when the data is intentionally multi-column regardless of key homogeneity.
+	ColumnarMode string `json:"columnarMode,omitempty" yaml:"columnarMode,omitempty" doc:"Columnar rendering mode: auto, always, never" example:"always" maxLength:"10"`
 }
 
 // DefaultViewerOptions returns sensible defaults.
@@ -215,6 +220,14 @@ func WithDisplaySchemaJSON(schema []byte) Option {
 	return func(o *ViewerOptions) { o.DisplaySchemaJSON = schema }
 }
 
+// WithColumnarMode controls when arrays of objects render as multi-column tables.
+// Valid values: tui.ColumnarModeAuto ("auto"), tui.ColumnarModeAlways ("always"),
+// tui.ColumnarModeNever ("never"). Use "always" when data is intentionally multi-column
+// regardless of key homogeneity.
+func WithColumnarMode(mode string) Option {
+	return func(o *ViewerOptions) { o.ColumnarMode = mode }
+}
+
 // WithContext sets the context for CEL expression evaluation.
 // This enables context-dependent features like debug.out when Writer is in context.
 func WithContext(ctx context.Context) Option {
@@ -294,14 +307,19 @@ func View(data any, opts ...Option) error {
 // renderTable outputs data as a bordered table (non-interactive).
 func renderTable(root any, options *ViewerOptions) error {
 	hints := resolveColumnHints(options.SchemaJSON, options.ColumnHints)
+	if options.ColumnarMode == tui.ColumnarModeAlways {
+		root = normalizeSliceKeys(root)
+	}
 	output := tui.RenderTable(root, tui.TableOptions{
-		AppName:     options.AppName,
-		Path:        "_",
-		Bordered:    true,
-		Width:       options.Width,
-		NoColor:     options.NoColor,
-		ColumnOrder: options.ColumnOrder,
-		ColumnHints: hints,
+		AppName:      options.AppName,
+		Path:         "_",
+		Bordered:     true,
+		Width:        options.Width,
+		NoColor:      options.NoColor,
+		ColumnOrder:  options.ColumnOrder,
+		ColumnHints:  hints,
+		ColumnarMode: options.ColumnarMode,
+		Schema:       resolveDisplaySchema(options.DisplaySchemaJSON),
 	})
 	fmt.Fprint(options.Out, output)
 	return nil
@@ -340,6 +358,20 @@ func renderList(root any, options *ViewerOptions) error {
 	output := tui.RenderList(root, options.NoColor)
 	fmt.Fprint(options.Out, output)
 	return nil
+}
+
+// resolveDisplaySchema parses a DisplaySchemaJSON document and returns the
+// display schema, or nil if the input is empty or invalid. Used to pass
+// schema-derived column ordering to non-interactive renderers.
+func resolveDisplaySchema(displaySchemaJSON []byte) *tui.DisplaySchema {
+	if len(displaySchemaJSON) == 0 {
+		return nil
+	}
+	_, ds, err := tui.ParseSchemaWithDisplay(displaySchemaJSON)
+	if err != nil {
+		return nil
+	}
+	return ds
 }
 
 // renderTree outputs data as an ASCII tree structure.
@@ -399,6 +431,10 @@ func RenderTable(data any, opts tui.TableOptions) (string, error) {
 	root, err := core.LoadObject(data)
 	if err != nil {
 		return "", fmt.Errorf("failed to load data: %w", err)
+	}
+
+	if opts.ColumnarMode == tui.ColumnarModeAlways {
+		root = normalizeSliceKeys(root)
 	}
 
 	return tui.RenderTable(root, opts), nil

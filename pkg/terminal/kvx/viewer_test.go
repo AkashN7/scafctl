@@ -4,6 +4,7 @@
 package kvx
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
@@ -247,6 +248,12 @@ func TestApplyWhereFilter_Empty(t *testing.T) {
 	assert.Equal(t, data, result)
 }
 
+func TestWithColumnarMode(t *testing.T) {
+	opts := DefaultViewerOptions()
+	WithColumnarMode(tui.ColumnarModeAlways)(opts)
+	assert.Equal(t, tui.ColumnarModeAlways, opts.ColumnarMode)
+}
+
 func TestApplyWhereFilter_Filters(t *testing.T) {
 	data := []map[string]any{
 		{"name": "keep", "ok": true},
@@ -264,4 +271,93 @@ func TestApplyWhereFilter_InvalidExpr(t *testing.T) {
 	_, err := applyWhereFilter("invalid((", data)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "where filter failed")
+}
+
+func TestResolveDisplaySchema_Valid(t *testing.T) {
+	schema := []byte(`{
+		"type": "array",
+		"x-kvx-list": {
+			"titleField": "handler",
+			"badgeFields": ["status"],
+			"secondaryFields": ["profile"]
+		},
+		"x-kvx-detail": {
+			"hiddenFields": ["clientId", "tenantId"]
+		},
+		"items": {
+			"type": "object",
+			"properties": {
+				"handler": {"type": "string"},
+				"status": {"type": "string"},
+				"profile": {"type": "string"}
+			}
+		}
+	}`)
+
+	ds := resolveDisplaySchema(schema)
+	require.NotNil(t, ds)
+	require.NotNil(t, ds.List)
+	assert.Equal(t, "handler", ds.List.TitleField)
+
+	order, hidden := tui.DeriveTableOptionsFromSchema(ds)
+	assert.Equal(t, []string{"handler", "status", "profile"}, order)
+	assert.Equal(t, []string{"clientId", "tenantId"}, hidden)
+}
+
+func TestResolveDisplaySchema_Empty(t *testing.T) {
+	assert.Nil(t, resolveDisplaySchema(nil))
+	assert.Nil(t, resolveDisplaySchema([]byte{}))
+}
+
+func TestResolveDisplaySchema_Invalid(t *testing.T) {
+	assert.Nil(t, resolveDisplaySchema([]byte("not json")))
+}
+
+func TestResolveDisplaySchema_NoExtensions(t *testing.T) {
+	schema := []byte(`{"type": "array", "items": {"type": "object"}}`)
+	assert.Nil(t, resolveDisplaySchema(schema))
+}
+
+func TestRenderTable_ColumnarModeAlways_ForcesColumnar(t *testing.T) {
+	// Regression test for #440: auth status maps are normalized to have identical
+	// key sets (homogeneous) so kvx can render them as multi-column tables.
+	// ColumnarModeAlways is used as belt-and-suspenders; in kvx v0.12 it still
+	// requires ExtractColumnarData to succeed (homogeneous keys), but it bypasses
+	// the type-assertion gate so future kvx versions can relax that constraint.
+	data := []map[string]any{
+		{"handler": "entra", "status": "authenticated", "expiresIn": "2h"},
+		{"handler": "github", "status": "authenticated", "expiresIn": ""},
+	}
+
+	out := &bytes.Buffer{}
+
+	err := View(data, WithIO(nil, out), WithNoColor(true), WithColumnarMode("always"), WithColumnOrder([]string{"handler", "status", "expiresIn"}), WithDimensions(100, 24))
+	assert.NoError(t, err)
+
+	output := out.String()
+	// Should contain column headers, not KEY/VALUE fallback
+	assert.Contains(t, output, "handler")
+	assert.Contains(t, output, "status")
+	assert.NotContains(t, output, "[0]")
+	assert.NotContains(t, output, "[1]")
+}
+
+func TestRenderTable_ColumnarModeAlways_TypedSlice(t *testing.T) {
+	// Regression: RenderTable must normalize after LoadObject so
+	// []map[string]any input (not []any) is handled correctly.
+	data := []map[string]any{
+		{"handler": "entra", "status": "authenticated"},
+		{"handler": "github", "expiresIn": "1h"},
+	}
+
+	out, err := RenderTable(data, tui.TableOptions{
+		ColumnarMode: tui.ColumnarModeAlways,
+		NoColor:      true,
+		Width:        100,
+	})
+	require.NoError(t, err)
+
+	assert.Contains(t, out, "handler")
+	assert.Contains(t, out, "status")
+	assert.Contains(t, out, "expiresIn")
 }

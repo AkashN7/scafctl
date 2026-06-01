@@ -289,6 +289,37 @@ This is separate from the hashicorp/go-plugin handshake `ProtocolVersion`, which
 
 The plugin client caches provider descriptors after the first `GetProviderDescriptor` call to avoid repeated gRPC round-trips. The cache is protected by a `sync.RWMutex` for safe concurrent access. Descriptors are immutable once loaded.
 
+### gRPC Message Size
+
+scafctl configures both `MaxCallRecvMsgSize` and `MaxCallSendMsgSize` on the gRPC dial options. The default is **64 MB** (`67108864` bytes). This replaces the gRPC library default of 4 MB and accommodates legitimately large provider inputs (e.g., a large HCL file) or large outputs.
+
+Adjust via config when needed:
+
+```yaml
+plugins:
+  grpcMaxMessageSize: 134217728  # 128 MB
+```
+
+Or with the CLI:
+
+```bash
+scafctl config set plugins.grpcMaxMessageSize 134217728
+```
+
+> **Note**: This limit applies only to the host side (the client's dial options). The plugin server side has a separate default from the gRPC library. For very large messages, both the host config and the plugin SDK's server options must be tuned. See [Plugin Protocol Efficiency](plugin-protocol-efficiency.md) for background.
+
+### Resolver Context and the gRPC Boundary
+
+scafctl resolves all `expr:`, `rslvr:`, and `tmpl:` ValueRefs in the solution **before** making any gRPC call. Plugins receive fully resolved, concrete input values. The resolver context (`_` map) is **not** sent to plugins.
+
+This is intentional and correct:
+
+- **Providers declare an input schema via `Descriptor()`.** That schema is the API contract. Inputs validated against the schema are the only data providers should need.
+- **The engine does the resolution work.** By the time a plugin is called, all dependencies are resolved. Passing `_` would be redundant data that bypasses the schema.
+- **Keeping `_` off the wire eliminates a class of gRPC `ResourceExhausted` errors** for solutions with large accumulated resolver data (see [issue #451](https://github.com/oakwood-commons/scafctl/issues/451)).
+
+Built-in providers (CEL, go-template, validation, static, parameter) run in-process and can access the resolver context directly via `ResolverContextFromContext(ctx)`. Plugin providers must declare all their dependencies as explicit inputs.
+
 ### Schema Round-Trip
 
 Provider descriptors carry both structured `Schema`/`OutputSchemas` fields and raw JSON bytes (`raw_schema`, `raw_output_schemas`). The raw bytes are preferred for lossless round-tripping of `jsonschema.Schema`; the structured fields serve as a backward-compatible fallback for older plugins.
@@ -751,6 +782,63 @@ The signature policy flows through the context:
 
 The `prepare.BuildPluginFetcherWithConfig` function resolves the policy using
 this priority chain.
+
+---
+
+## Version Pinning
+
+When multiple versions of a plugin provider are cached locally, users can pin
+execution to a specific version. This is essential during plugin development
+and testing workflows where different versions must be compared.
+
+### Pinning Mechanisms
+
+| Mechanism | Scope | Example |
+|-----------|-------|---------|
+| `name@version` positional syntax | Single `run provider` invocation | `scafctl run provider exec@0.5.0 command="echo hi"` |
+| `--plugin-version` flag | Single `run provider` invocation | `scafctl run provider exec --plugin-version 0.5.0 command="echo hi"` |
+| `bundle.plugins[].version` | Solution-level constraint | `version: "0.5.0"` or `version: "^1.0.0"` |
+| MCP `plugin_version` parameter | Single `run_provider` tool call | `"plugin_version": "0.5.0"` |
+
+### Resolution Strategy
+
+1. Parse `name@version` from the positional argument (splits on last `@`)
+2. If `--plugin-version` flag is also set, the flag takes precedence
+3. Look up the exact version in the local plugin cache (`pkg/plugin/cache.go`)
+4. If the version is not cached, return an error -- no fallback to latest
+
+The `@` syntax is parsed by `parseProviderNameVersion()` in the CLI layer.
+A bare `@` at position 0 (e.g., `@latest`) is treated as a name with no version.
+
+### Implementation
+
+| Component | Package | Role |
+|-----------|---------|------|
+| `parseProviderNameVersion` | `pkg/cmd/scafctl/run/provider.go` | Splits `name@version` |
+| `RegisterCachedPluginVersion` | `pkg/plugin/fetcher.go` | Loads exact version from cache |
+| `PluginVersion` field on `ProviderOptions` | `pkg/cmd/scafctl/run/provider.go` | Carries version through CLI |
+| `ensureProvider(ctx, name, version...)` | `pkg/mcp/tools_provider.go` | MCP version-aware resolution |
+
+### Visibility
+
+Plugin versions are visible through:
+
+- `scafctl plugins list` -- shows version column for cached plugins
+- `scafctl get provider -o json` -- includes version for all providers
+- `scafctl catalog list --kind provider --all-versions` -- shows all available versions
+- MCP `list_providers` tool -- returns version field per provider
+
+Pre-release versions are hidden by default in `catalog list`. A warning indicates
+how many were filtered and suggests `--pre-release` to reveal them.
+
+### Behavior Without Pinning
+
+When no version is specified, the latest cached version is used. The resolution
+order is:
+
+1. Exact version match (when pinned)
+2. Latest cached version matching platform (default)
+3. Auto-fetch from catalog chain if not cached
 
 ---
 

@@ -4,10 +4,12 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/oakwood-commons/scafctl/pkg/api/middleware"
 	"github.com/oakwood-commons/scafctl/pkg/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -35,6 +37,107 @@ func TestManager_Load_NoFile(t *testing.T) {
 	assert.Equal(t, "official", cfg.Settings.DefaultCatalog)
 	assert.False(t, cfg.Settings.NoColor)
 	assert.False(t, cfg.Settings.Quiet)
+	assert.Nil(t, cfg.APIServer.TokenPassThrough)
+	assert.Equal(t, []string{"Github"}, cfg.APIServer.TokenPassThroughAllowedHeaders())
+}
+
+func TestManager_Load_TokenPassThroughAllowedHeaders(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+apiServer:
+  tokenPassThrough:
+    allowedHeaders:
+      - " azure-ad "
+      - github-enterprise
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0o600)
+	require.NoError(t, err)
+
+	mgr := NewManager(configPath)
+	cfg, err := mgr.Load()
+
+	require.NoError(t, err)
+	require.NotNil(t, cfg.APIServer.TokenPassThrough)
+	assert.Equal(t, []string{" azure-ad ", "github-enterprise"}, cfg.APIServer.TokenPassThrough.AllowedHeaders)
+	assert.Equal(t, []string{"Azure-Ad", "Github-Enterprise"}, cfg.APIServer.TokenPassThroughAllowedHeaders())
+}
+
+func TestManager_Load_TokenPassThroughExplicitEmptyAllowedHeaders(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+apiServer:
+  tokenPassThrough:
+    allowedHeaders: []
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0o600)
+	require.NoError(t, err)
+
+	mgr := NewManager(configPath)
+	cfg, err := mgr.Load()
+
+	require.NoError(t, err)
+	require.NotNil(t, cfg.APIServer.TokenPassThrough)
+	assert.Empty(t, cfg.APIServer.TokenPassThrough.AllowedHeaders)
+	assert.Empty(t, cfg.APIServer.TokenPassThroughAllowedHeaders())
+}
+
+func TestManager_Load_TokenPassThroughInvalidAllowedHeaders(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		header  string
+		wantErr string
+	}{
+		{
+			name:    "empty",
+			header:  `""`,
+			wantErr: "allowedHeaders[0]: must not be empty",
+		},
+		{
+			name:    "prefixed",
+			header:  fmt.Sprintf("%s%s", middleware.TokenHeaderPrefix, "Github"),
+			wantErr: fmt.Sprintf("allowedHeaders[0]: must not include %s prefix", middleware.TokenHeaderPrefix),
+		},
+		{
+			name:    "invalid header field name",
+			header:  `"Bad Header"`,
+			wantErr: `allowedHeaders[0]: invalid HTTP header suffix "Bad Header"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tmpDir := t.TempDir()
+			configPath := filepath.Join(tmpDir, "config.yaml")
+
+			configContent := `
+apiServer:
+  tokenPassThrough:
+    allowedHeaders:
+      - ` + tt.header + `
+`
+			err := os.WriteFile(configPath, []byte(configContent), 0o600)
+			require.NoError(t, err)
+
+			mgr := NewManager(configPath)
+			_, err = mgr.Load()
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid config: apiServer: tokenPassThrough")
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
 }
 
 func TestManager_Load_WithFile(t *testing.T) {
@@ -740,4 +843,254 @@ func TestManager_WithEnvPrefix(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.NotNil(t, cfg)
+}
+
+func TestRestoreAuthProfileEntries_EmptyProfiles(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		yaml    string
+		handler string
+		profile string
+	}{
+		{
+			name:    "github empty profile roundtrips",
+			yaml:    "auth:\n  github:\n    profiles:\n      work: {}\n",
+			handler: "github",
+			profile: "work",
+		},
+		{
+			name:    "entra empty profile roundtrips",
+			yaml:    "auth:\n  entra:\n    profiles:\n      personal: {}\n",
+			handler: "entra",
+			profile: "personal",
+		},
+		{
+			name:    "gcp empty profile roundtrips",
+			yaml:    "auth:\n  gcp:\n    profiles:\n      staging: {}\n",
+			handler: "gcp",
+			profile: "staging",
+		},
+		{
+			name:    "github multiple empty profiles",
+			yaml:    "auth:\n  github:\n    profiles:\n      work: {}\n      personal: {}\n",
+			handler: "github",
+			profile: "work",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tmpDir := t.TempDir()
+			configPath := filepath.Join(tmpDir, "config.yaml")
+			require.NoError(t, os.WriteFile(configPath, []byte(tt.yaml), 0o600))
+
+			mgr := NewManager(configPath)
+			cfg, err := mgr.Load()
+			require.NoError(t, err)
+
+			switch tt.handler {
+			case "github":
+				require.NotNil(t, cfg.Auth.GitHub, "Auth.GitHub should not be nil")
+				assert.Contains(t, cfg.Auth.GitHub.Profiles, tt.profile)
+			case "entra":
+				require.NotNil(t, cfg.Auth.Entra, "Auth.Entra should not be nil")
+				assert.Contains(t, cfg.Auth.Entra.Profiles, tt.profile)
+			case "gcp":
+				require.NotNil(t, cfg.Auth.GCP, "Auth.GCP should not be nil")
+				assert.Contains(t, cfg.Auth.GCP.Profiles, tt.profile)
+			}
+		})
+	}
+}
+
+func TestRestoreAuthProfileEntries_PreservesNonEmpty(t *testing.T) {
+	t.Parallel()
+
+	yaml := `auth:
+  github:
+    clientId: "my-app"
+    profiles:
+      work:
+        clientId: "work-app"
+      empty: {}
+`
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(yaml), 0o600))
+
+	mgr := NewManager(configPath)
+	cfg, err := mgr.Load()
+	require.NoError(t, err)
+
+	require.NotNil(t, cfg.Auth.GitHub)
+	assert.Equal(t, "my-app", cfg.Auth.GitHub.ClientID)
+	assert.Len(t, cfg.Auth.GitHub.Profiles, 2)
+	assert.Equal(t, "work-app", cfg.Auth.GitHub.Profiles["work"].ClientID)
+	assert.NotNil(t, cfg.Auth.GitHub.Profiles["empty"])
+}
+
+func TestManager_Delete_SimpleKey(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+
+	initial := `logging:
+  level: "2"
+  format: json
+settings:
+  noColor: true
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(initial), 0o600))
+
+	mgr := NewManager(configPath)
+	_, err := mgr.Load()
+	require.NoError(t, err)
+
+	removed, err := mgr.Delete("logging.level")
+	require.NoError(t, err)
+	assert.True(t, removed)
+
+	// Verify the key is removed from file.
+	data, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "level")
+	// Other keys remain.
+	assert.Contains(t, string(data), "format")
+	assert.Contains(t, string(data), "noColor")
+}
+
+func TestManager_Delete_NestedArraySection(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+
+	initial := `auth:
+  customOAuth2:
+    - name: my-handler
+      clientId: abc123
+      scopes:
+        - read
+        - write
+  github:
+    clientId: test-id
+settings:
+  defaultCatalog: official
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(initial), 0o600))
+
+	mgr := NewManager(configPath)
+	_, err := mgr.Load()
+	require.NoError(t, err)
+
+	removed, err := mgr.Delete("auth.customOAuth2")
+	require.NoError(t, err)
+	assert.True(t, removed)
+
+	// Verify customOAuth2 is removed but other auth keys remain.
+	data, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "customOAuth2")
+	assert.NotContains(t, string(data), "my-handler")
+	assert.Contains(t, string(data), "github")
+	assert.Contains(t, string(data), "test-id")
+}
+
+func TestManager_Delete_TopLevelKey(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+
+	initial := `logging:
+  level: "2"
+settings:
+  noColor: true
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(initial), 0o600))
+
+	mgr := NewManager(configPath)
+	_, err := mgr.Load()
+	require.NoError(t, err)
+
+	removed, err := mgr.Delete("logging")
+	require.NoError(t, err)
+	assert.True(t, removed)
+
+	data, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "logging")
+	assert.NotContains(t, string(data), "level")
+	assert.Contains(t, string(data), "settings")
+}
+
+func TestManager_Delete_NonexistentKey(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+
+	initial := `logging:
+  level: "2"
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(initial), 0o600))
+
+	mgr := NewManager(configPath)
+	_, err := mgr.Load()
+	require.NoError(t, err)
+
+	// Should not error on non-existent key.
+	removed, err := mgr.Delete("nonexistent.key")
+	require.NoError(t, err)
+	assert.False(t, removed)
+
+	// File unchanged.
+	data, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "level")
+}
+
+func TestManager_Delete_CleansEmptyParents(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+
+	initial := `auth:
+  github:
+    clientId: test-id
+settings:
+  defaultCatalog: official
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(initial), 0o600))
+
+	mgr := NewManager(configPath)
+	_, err := mgr.Load()
+	require.NoError(t, err)
+
+	removed, err := mgr.Delete("auth.github.clientId")
+	require.NoError(t, err)
+	assert.True(t, removed)
+
+	data, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	// github section had only clientId, so it should be cleaned up.
+	assert.NotContains(t, string(data), "clientId")
+	assert.NotContains(t, string(data), "github")
+	// auth is now empty, so it should be removed too.
+	assert.NotContains(t, string(data), "auth")
+	assert.Contains(t, string(data), "settings")
+}
+
+func TestManager_Delete_MissingFileIsNoOp(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "nonexistent", "config.yaml")
+
+	mgr := NewManager(configPath)
+	// Don't call Load -- simulate fresh install with no config file.
+
+	removed, err := mgr.Delete("logging.level")
+	require.NoError(t, err)
+	assert.False(t, removed)
 }

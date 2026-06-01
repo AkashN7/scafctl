@@ -71,6 +71,8 @@ You should see JSON output listing all available tools:
     { "name": "inspect_solution", "description": "Get full solution metadata..." },
     { "name": "lint_solution", "description": "Validate a solution file..." },
     { "name": "list_auth_handlers", "description": "List all registered auth handlers..." },
+    { "name": "auth_list_tokens", "description": "List all cached access tokens across auth handlers..." },
+    { "name": "auth_purge_expired", "description": "Remove expired access tokens from the cache..." },
     { "name": "list_cel_functions", "description": "List all available CEL functions..." },
     { "name": "list_go_template_functions", "description": "List all available Go template extension functions..." },
     { "name": "list_examples", "description": "List available scafctl example files..." },
@@ -708,8 +710,8 @@ The AI calls `inspect_solution` with `path: "solution.yaml"` and the response in
 | `explain_kind` | Explain any registered kind (solution, resolver, action, etc.) — shows all fields, types, descriptions, and validation tags |
 | `explain_lint_rule` | Get a detailed explanation of a lint rule — description, severity, category, why it matters, how to fix it, and examples |
 | `get_example` | Read the contents of a scafctl example file. Use `list_examples` first to find available examples |
-| `get_provider_schema` | Get comprehensive provider info: input schema (with per-property required), output schemas, examples, CLI usage |
-| `get_provider_output_shape` | Get the output schema for a provider. Optionally filter by capability (`from`, `transform`, `action`) |
+| `get_provider_schema` | Get comprehensive provider info: input schema (with per-property required), output schemas, examples, CLI usage. Works for builtin and official plugin providers -- plugin schemas are auto-fetched on first request and cached locally for offline access (response includes `"source": "cached"` when served from cache) |
+| `get_provider_output_shape` | Get the output schema for a provider. Optionally filter by capability (`from`, `transform`, `action`). Falls back to cached descriptor when the plugin binary is unavailable |
 | `get_solution_schema` | Get the full JSON Schema for the solution YAML file format. Optionally drill into a specific field (e.g., `metadata`, `spec`) |
 | `get_run_command` | Get the exact CLI command to run a solution (determines run solution vs run resolver) |
 | `explain_concepts` | Look up and explain scafctl concepts (resolvers, providers, testing, CEL, etc.). Use without arguments to list all, or provide a name/query/category |
@@ -733,7 +735,9 @@ The AI calls `inspect_solution` with `path: "solution.yaml"` and the response in
 | `show_snapshot` | Display the contents of a resolver execution snapshot file — resolver values, timing, status, and errors |
 | `diff_snapshots` | Compare two resolver snapshots and return structured diffs — added, removed, modified, and unchanged resolvers |
 | `list_auth_handlers` | List all registered authentication handlers with their configuration status and token expiry |
-| `get_config_paths` | List all XDG-compliant paths used by scafctl — config, data, cache, state, secrets, plugins, and runtime directories |
+| `auth_list_tokens` | List all cached access tokens across registered auth handlers -- shows metadata (handler, scope, flow, expiry) without revealing token values |
+| `auth_purge_expired` | Remove expired access tokens from the cache across all (or a specific) auth handler. Keeps valid tokens and refresh tokens |
+| `get_config_paths` | List all XDG-compliant paths used by scafctl -- config, data, cache, state, secrets, plugins, provider-schemas, and runtime directories |
 | `validate_expressions` | Batch-validate multiple CEL expressions or Go templates — returns validity, errors, and referenced fields for each |
 | `get_version` | Return scafctl version, commit SHA, and build timestamp |
 | `dry_run_solution` | Dry-run a solution without executing action providers. Resolvers run normally; each action gets a provider-generated WhatIf description of what it would do |

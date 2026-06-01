@@ -31,6 +31,7 @@ var (
 	_ auth.TokenLister  = (*AuthHandlerWrapper)(nil)
 	_ auth.TokenPurger  = (*AuthHandlerWrapper)(nil)
 	_ auth.FlowDetector = (*AuthHandlerWrapper)(nil)
+	_ auth.Configurer   = (*AuthHandlerWrapper)(nil)
 )
 
 // AuthHandlerWrapper wraps a plugin auth handler to implement the auth.Handler
@@ -41,7 +42,17 @@ type AuthHandlerWrapper struct {
 	info           AuthHandlerInfo
 	trustedDomains []string
 	startupLatency time.Duration
+	hostCfg        hostConfig // host-level config (Quiet, NoColor, BinaryName)
 	mu             sync.RWMutex
+}
+
+// hostConfig stores host-level ProviderConfig fields so ApplyOverrides
+// can reconstruct a full config without zeroing them.
+type hostConfig struct {
+	Quiet      bool
+	NoColor    bool
+	BinaryName string
+	Profile    string
 }
 
 // NewAuthHandlerWrapper creates a new wrapper for a plugin auth handler.
@@ -230,6 +241,67 @@ func (w *AuthHandlerWrapper) DetectAvailableFlows(ctx context.Context) ([]auth.F
 	return w.client.plugin.DetectAvailableFlows(ctx, w.handlerName)
 }
 
+// ApplyOverrides implements auth.Configurer.
+// It merges the provided key-value overrides into the handler's current
+// plugin configuration and re-sends ConfigureAuthHandler to the plugin process.
+// This allows CLI flags (e.g., --client-id, --tenant) to override config-file
+// and default settings at runtime before login.
+func (w *AuthHandlerWrapper) ApplyOverrides(ctx context.Context, overrides map[string]string) error {
+	if len(overrides) == 0 {
+		return nil
+	}
+
+	// Filter out empty values before marshaling — empty strings mean "not set"
+	// and should not be forwarded to the plugin.
+	filtered := make(map[string]string, len(overrides))
+	for k, v := range overrides {
+		if v != "" {
+			filtered[k] = v
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+
+	// Build a settings map with just the overrides for this handler.
+	settingsJSON, err := json.Marshal(filtered)
+	if err != nil {
+		return fmt.Errorf("marshaling overrides: %w", err)
+	}
+
+	// Reconstruct the ProviderConfig with the override settings merged.
+	// Preserve host-level fields (Quiet, NoColor, BinaryName) from initial config.
+	cfg := ProviderConfig{
+		Quiet:         w.hostCfg.Quiet,
+		NoColor:       w.hostCfg.NoColor,
+		BinaryName:    w.hostCfg.BinaryName,
+		Profile:       w.hostCfg.Profile,
+		Settings:      map[string]json.RawMessage{w.handlerName: settingsJSON},
+		HostServiceID: w.client.HostServiceID(),
+	}
+
+	// Inject base settings from app config first, then overlay overrides.
+	injectAuthHandlerSettings(ctx, w.handlerName, &cfg)
+
+	// Merge overrides on top of base settings.
+	if base, ok := cfg.Settings[w.handlerName]; ok {
+		var baseMap map[string]interface{}
+		if jsonErr := json.Unmarshal(base, &baseMap); jsonErr != nil {
+			return fmt.Errorf("unmarshaling base settings for handler %s: %w", w.handlerName, jsonErr)
+		}
+		for k, v := range filtered {
+			baseMap[k] = v
+		}
+		merged, mergeErr := json.Marshal(baseMap)
+		if mergeErr != nil {
+			return fmt.Errorf("marshaling merged settings for handler %s: %w", w.handlerName, mergeErr)
+		}
+		cfg.Settings[w.handlerName] = merged
+	}
+
+	return w.client.ConfigureAuthHandler(ctx, w.handlerName, cfg)
+}
+
 // Client returns the underlying plugin client.
 func (w *AuthHandlerWrapper) Client() *AuthHandlerClient {
 	return w.client
@@ -302,6 +374,12 @@ func configureAndRegisterAuthHandlers(ctx context.Context, registry *auth.Regist
 					"handler", info.Name,
 					"error", cfgErr)
 			}
+			wrapper.hostCfg = hostConfig{
+				Quiet:      cfg.Quiet,
+				NoColor:    cfg.NoColor,
+				BinaryName: cfg.BinaryName,
+				Profile:    cfg.Profile,
+			}
 		}
 	}
 
@@ -342,13 +420,17 @@ func buildTrustedDomains(handlerName string, officialReg *authofficial.Registry,
 }
 
 // injectAuthHandlerSettings reads per-handler auth configuration from the app
-// config and serializes it into cfg.Settings[handlerName] so the plugin can
-// apply host-side overrides (clientId, hostname, scopes, etc.).
+// config, resolves the active profile (merging profile overrides on top of
+// top-level config), and serializes the result into cfg.Settings[handlerName]
+// so the plugin can apply host-side overrides (clientId, hostname, scopes, etc.).
 func injectAuthHandlerSettings(ctx context.Context, handlerName string, cfg *ProviderConfig) {
 	appCfg := config.FromContext(ctx)
 	if appCfg == nil {
 		return
 	}
+
+	profile := auth.ResolveActiveProfile(ctx, handlerName)
+	cfg.Profile = profile
 
 	var raw json.RawMessage
 	var err error
@@ -358,17 +440,20 @@ func injectAuthHandlerSettings(ctx context.Context, handlerName string, cfg *Pro
 		if appCfg.Auth.GitHub == nil {
 			return
 		}
-		raw, err = json.Marshal(appCfg.Auth.GitHub) //nolint:gosec // G117: intentionally forwarding host config (including clientSecret) to plugin over local gRPC
+		resolved := auth.ResolveGitHubConfig(appCfg.Auth.GitHub, profile)
+		raw, err = json.Marshal(resolved) //nolint:gosec // G117: intentionally forwarding host config (including clientSecret) to plugin over local gRPC
 	case "entra":
 		if appCfg.Auth.Entra == nil {
 			return
 		}
-		raw, err = json.Marshal(appCfg.Auth.Entra)
+		resolved := auth.ResolveEntraConfig(appCfg.Auth.Entra, profile)
+		raw, err = json.Marshal(resolved) //nolint:gosec // G117: intentionally forwarding host config (including clientSecret) to plugin over local gRPC
 	case "gcp":
 		if appCfg.Auth.GCP == nil {
 			return
 		}
-		raw, err = json.Marshal(appCfg.Auth.GCP) //nolint:gosec // G117: intentionally forwarding host config (including clientSecret) to plugin over local gRPC
+		resolved := auth.ResolveGCPConfig(appCfg.Auth.GCP, profile)
+		raw, err = json.Marshal(resolved) //nolint:gosec // G117: intentionally forwarding host config (including clientSecret) to plugin over local gRPC
 	default:
 		return
 	}

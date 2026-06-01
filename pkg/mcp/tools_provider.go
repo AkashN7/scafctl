@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/oakwood-commons/scafctl/pkg/celexp"
@@ -22,7 +23,7 @@ import (
 // registry by looking it up in the official provider registry and loading
 // it via the plugin pool. On success, returns a non-nil release function
 // that the caller must defer. Returns an error if the provider cannot be resolved.
-func (s *Server) ensureProvider(ctx context.Context, name string) (release func(), err error) {
+func (s *Server) ensureProvider(ctx context.Context, name string, version ...string) (release func(), err error) {
 	if s.pluginPool == nil {
 		return nil, fmt.Errorf("provider %q not found and plugin pool not configured", name)
 	}
@@ -35,6 +36,9 @@ func (s *Server) ensureProvider(ctx context.Context, name string) (release func(
 		return nil, fmt.Errorf("provider %q is not a known official provider", name)
 	}
 	dep := op.ToPluginDependency()
+	if len(version) > 0 && version[0] != "" {
+		dep.Version = version[0]
+	}
 	rel, err := s.pluginPool.EnsureAndAcquire(ctx, []solution.PluginDependency{dep})
 	if err != nil {
 		return nil, fmt.Errorf("loading plugin for provider %q: %w", name, err)
@@ -76,7 +80,7 @@ func (s *Server) registerProviderTools() {
 
 	// get_provider_schema
 	getProviderSchemaTool := mcp.NewTool("get_provider_schema",
-		mcp.WithDescription("Get comprehensive information about a provider: input schema (properties with types, required/optional, defaults, validation), output schemas per capability, YAML usage examples, CLI usage examples, capabilities, and version info. ALWAYS call this before writing action or resolver YAML to verify exact field names, types, and which fields are required."),
+		mcp.WithDescription("Get comprehensive information about a provider: input schema (properties with types, required/optional, defaults, validation), output schemas per capability, YAML usage examples, CLI usage examples, capabilities, and version info. Works for both builtin providers and official plugin providers (directory, env, exec, git, github, hcl, identity, metadata, secret, sleep) — plugin providers are auto-resolved from the catalog on first request and their schemas are cached locally for offline access. ALWAYS call this before writing action or resolver YAML to verify exact field names, types, and which fields are required."),
 		mcp.WithTitleAnnotation("Get Provider Schema"),
 		mcp.WithToolIcons(toolIcons["provider"]),
 		mcp.WithReadOnlyHintAnnotation(true),
@@ -143,6 +147,12 @@ func (s *Server) registerProviderTools() {
 			mcp.Description("Optional CEL expression to filter/transform the provider output before returning. "+
 				"The result object is bound to '_' (e.g., '_.data', 'size(_.data)', '_.data.filter(x, x.status == \"open\")'). "+
 				"Use this to reduce large outputs to only the fields you need."),
+		),
+		mcp.WithString("plugin_version",
+			mcp.Description("Pin to a specific plugin version (e.g., \"0.5.0\"). "+
+				"Only applies to official/plugin providers. When set, that exact version is loaded "+
+				"(fetching from the catalog if not already cached). Without this, the version is "+
+				"resolved automatically from the catalog."),
 		),
 	)
 	s.addTool(runProviderTool, s.handleRunProvider)
@@ -246,20 +256,42 @@ func (s *Server) handleGetProviderSchema(ctx context.Context, request mcp.CallTo
 
 	desc, err := inspect.LookupProvider(s.ctx, name, s.registry)
 	if err != nil {
-		// Try auto-resolving via the plugin pool before falling back
-		release, resolveErr := s.ensureProvider(ctx, name)
+		// Try auto-resolving via the plugin pool with a timeout
+		fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		release, resolveErr := s.ensureProvider(fetchCtx, name)
 		if resolveErr == nil {
 			defer release()
 			desc, err = inspect.LookupProvider(s.ctx, name, s.registry)
 		}
 	}
+
+	// On success, cache the descriptor for offline access
+	if err == nil && desc != nil && s.descriptorCache != nil {
+		_ = s.descriptorCache.Put(name, *desc)
+	}
+
 	if err != nil {
+		// Try the descriptor cache before falling back to metadata-only
+		if s.descriptorCache != nil {
+			if cached := s.descriptorCache.Get(name); cached != nil {
+				detail := provdetail.BuildProviderDetail(*cached)
+				detail["source"] = "cached"
+				return mcp.NewToolResultJSON(detail)
+			}
+		}
+
 		// Check official provider registry before returning error
 		if officialReg := official.RegistryFromContext(s.ctx); officialReg != nil {
 			if op, found := officialReg.Get(name); found {
 				detail := official.Detail(op)
 				detail["schemaAvailable"] = false
-				detail["hint"] = "Full schema, examples, and capabilities are unavailable until the plugin is fetched. Run 'plugins install " + op.CatalogRef + "' to fetch it."
+				detail["hint"] = fmt.Sprintf(
+					"Full schema, examples, and capabilities are unavailable. "+
+						"The plugin could not be auto-fetched (check network/catalog config). "+
+						"Run '%s plugins install %s' to fetch it manually.",
+					s.name, op.CatalogRef,
+				)
 				return mcp.NewToolResultJSON(detail)
 			}
 		}
@@ -306,13 +338,31 @@ func (s *Server) handleGetProviderOutputShape(ctx context.Context, request mcp.C
 
 	desc, err := inspect.LookupProvider(s.ctx, name, s.registry)
 	if err != nil {
-		// Try auto-resolving via the plugin pool
-		release, resolveErr := s.ensureProvider(ctx, name)
+		// Try auto-resolving via the plugin pool with a timeout
+		fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		release, resolveErr := s.ensureProvider(fetchCtx, name)
 		if resolveErr == nil {
 			defer release()
 			desc, err = inspect.LookupProvider(s.ctx, name, s.registry)
 		}
 	}
+	// Track whether the descriptor came from cache to avoid resetting cachedAt.
+	fromCache := false
+	if err != nil && s.descriptorCache != nil {
+		if cached := s.descriptorCache.Get(name); cached != nil {
+			desc = cached
+			err = nil
+			fromCache = true
+		}
+	}
+
+	// On success, cache the descriptor for offline access -- but only when
+	// freshly fetched from a live registry/plugin, not from the cache itself.
+	if err == nil && desc != nil && s.descriptorCache != nil && !fromCache {
+		_ = s.descriptorCache.Put(name, *desc)
+	}
+
 	if err != nil {
 		availableNames := ""
 		if s.registry != nil {
@@ -392,6 +442,7 @@ func (s *Server) handleRunProvider(ctx context.Context, request mcp.CallToolRequ
 
 	capability := request.GetString("capability", "")
 	dryRun := request.GetBool("dry_run", false)
+	pluginVersion := request.GetString("plugin_version", "")
 
 	if s.registry == nil {
 		return newStructuredError(ErrCodeConfigError, "provider registry not available",
@@ -400,9 +451,27 @@ func (s *Server) handleRunProvider(ctx context.Context, request mcp.CallToolRequ
 	}
 
 	prov, ok := s.registry.Get(name)
+	if ok && pluginVersion != "" {
+		// Provider is already loaded -- verify version matches the requested pin.
+		desc := prov.Descriptor()
+		if desc.Version == nil {
+			return newStructuredError(ErrCodeVersionMismatch,
+				fmt.Sprintf("provider %q is a builtin and does not support version pinning", name),
+				WithField("plugin_version"),
+				WithSuggestion("Omit plugin_version for builtin providers, or use a plugin provider instead"),
+			), nil
+		}
+		if desc.Version.String() != pluginVersion {
+			return newStructuredError(ErrCodeVersionMismatch,
+				fmt.Sprintf("provider %q is loaded at version %s but version %s was requested", name, desc.Version, pluginVersion),
+				WithField("plugin_version"),
+				WithSuggestion("Restart the MCP session to load a different provider version"),
+			), nil
+		}
+	}
 	if !ok {
 		// Try auto-resolving via the plugin pool
-		release, resolveErr := s.ensureProvider(ctx, name)
+		release, resolveErr := s.ensureProvider(ctx, name, pluginVersion)
 		if resolveErr != nil {
 			return newStructuredError(ErrCodeLoadFailed,
 				fmt.Sprintf("failed to load provider %q: %v", name, resolveErr),

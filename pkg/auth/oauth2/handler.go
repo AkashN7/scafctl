@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -41,13 +42,20 @@ const (
 
 // Handler implements auth.Handler for generic configurable OAuth2 services.
 type Handler struct {
-	cfg         config.CustomOAuth2Config
-	secretStore secrets.Store
-	secretErr   error
-	tokenCache  *auth.TokenCache
-	httpClient  *http.Client
-	logger      logr.Logger
+	cfg             config.CustomOAuth2Config
+	secretStore     secrets.Store
+	secretErr       error
+	tokenCache      *auth.TokenCache
+	httpClient      *http.Client
+	logger          logr.Logger
+	secretKeyPrefix string
 }
+
+// Compile-time interface assertions.
+var (
+	_ auth.TokenLister = (*Handler)(nil)
+	_ auth.TokenPurger = (*Handler)(nil)
+)
 
 // Option configures the Handler.
 type Option func(*Handler)
@@ -67,6 +75,14 @@ func WithLogger(lgr logr.Logger) Option {
 	return func(h *Handler) { h.logger = lgr }
 }
 
+// WithSecretKeyPrefix overrides the default secret key prefix used for
+// storing secrets in the keychain. This allows the generic oauth2.Handler
+// to share tokens written by plugin auth handlers that use a different
+// prefix convention.
+func WithSecretKeyPrefix(prefix string) Option {
+	return func(h *Handler) { h.secretKeyPrefix = prefix }
+}
+
 // New creates a new generic OAuth2 auth handler from a CustomOAuth2Config.
 func New(cfg config.CustomOAuth2Config, opts ...Option) (*Handler, error) {
 	// Implicit grant flow does not use PKCE.
@@ -75,8 +91,9 @@ func New(cfg config.CustomOAuth2Config, opts ...Option) (*Handler, error) {
 	}
 
 	h := &Handler{
-		cfg:    cfg,
-		logger: logr.Discard(),
+		cfg:             cfg,
+		logger:          logr.Discard(),
+		secretKeyPrefix: secretKeyPrefix,
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -94,7 +111,7 @@ func New(cfg config.CustomOAuth2Config, opts ...Option) (*Handler, error) {
 		h.httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
 	if h.secretStore != nil {
-		prefix := secretKeyPrefix + h.cfg.Name + "." + tokenCacheSuffix
+		prefix := h.secretKeyPrefix + h.cfg.Name + "." + tokenCacheSuffix
 		h.tokenCache = auth.NewTokenCache(h.secretStore, prefix)
 	}
 	return h, nil
@@ -226,13 +243,14 @@ func (h *Handler) Logout(ctx context.Context) error {
 		return err
 	}
 	var errs []error
-	if h.tokenCache != nil {
-		if err := h.tokenCache.Clear(ctx); err != nil {
+	tc := h.profileTokenCache(ctx)
+	if tc != nil {
+		if err := tc.Clear(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("clear token cache: %w", err))
 		}
 	}
 	for _, suffix := range []string{secretKeyRefreshSuffix, secretKeyMetadataSuffix, derivedTokenSuffix, derivedUsernameSuffix} {
-		if err := h.secretStore.Delete(ctx, h.secretKey(suffix)); err != nil {
+		if err := h.secretStore.Delete(ctx, h.profileSecretKey(ctx, suffix)); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -242,15 +260,75 @@ func (h *Handler) Logout(ctx context.Context) error {
 	return nil
 }
 
+// ListCachedTokens returns all cached tokens for this handler.
+func (h *Handler) ListCachedTokens(ctx context.Context) ([]*auth.CachedTokenInfo, error) {
+	tc := h.profileTokenCache(ctx)
+	if tc == nil {
+		return nil, nil
+	}
+
+	entries, err := tc.ListCachedEntries(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list cached tokens for %s: %w", h.cfg.Name, err)
+	}
+
+	var result []*auth.CachedTokenInfo
+	var getErrors []string
+	for _, entry := range entries {
+		token, err := tc.Get(ctx, entry.Flow, entry.Fingerprint, entry.Scope)
+		if err != nil {
+			getErrors = append(getErrors, fmt.Sprintf("flow=%s scope=%s: %v", entry.Flow, entry.Scope, err))
+			continue
+		}
+		if token == nil {
+			continue
+		}
+		result = append(result, &auth.CachedTokenInfo{
+			Handler:     h.cfg.Name,
+			TokenKind:   "access",
+			Scope:       entry.Scope,
+			TokenType:   token.TokenType,
+			Flow:        entry.Flow,
+			Fingerprint: entry.Fingerprint,
+			ExpiresAt:   token.ExpiresAt,
+			CachedAt:    token.CachedAt,
+			IsExpired:   token.IsExpired(),
+			SessionID:   token.SessionID,
+		})
+	}
+
+	var retErr error
+	if len(getErrors) > 0 {
+		retErr = fmt.Errorf("partial read failures for %s: %s", h.cfg.Name, strings.Join(getErrors, "; "))
+	}
+	return result, retErr
+}
+
+// PurgeExpiredTokens removes all expired access tokens from the cache.
+func (h *Handler) PurgeExpiredTokens(ctx context.Context) (int, error) {
+	tc := h.profileTokenCache(ctx)
+	if tc == nil {
+		return 0, nil
+	}
+	n, err := tc.PurgeExpired(ctx)
+	if err != nil {
+		return n, fmt.Errorf("purge expired tokens for %s: %w", h.cfg.Name, err)
+	}
+	return n, nil
+}
+
 // Status returns the current authentication state.
 func (h *Handler) Status(ctx context.Context) (*auth.Status, error) {
 	if err := h.ensureSecrets(); err != nil {
-		return &auth.Status{Authenticated: false}, nil //nolint:nilerr // graceful degradation
+		return &auth.Status{Authenticated: false, Reason: "secrets store unavailable"}, nil //nolint:nilerr // graceful degradation
 	}
 
 	meta, err := h.loadMetadata(ctx)
-	if err != nil || meta == nil {
-		return &auth.Status{Authenticated: false}, nil //nolint:nilerr // metadata absence is not an error for status
+	if err != nil {
+		if errors.Is(err, secrets.ErrNotFound) {
+			return &auth.Status{Authenticated: false, Reason: "not logged in"}, nil
+		}
+		return &auth.Status{Authenticated: false, Reason: "metadata corrupt or unreadable"}, nil //nolint:nilerr // metadata error is not a caller error
 	}
 	if meta.ExpiresAt.Before(time.Now()) {
 		return &auth.Status{Authenticated: false, Reason: "session expired", Claims: meta.Claims}, nil
@@ -292,21 +370,22 @@ func (h *Handler) GetToken(ctx context.Context, opts auth.TokenOptions) (*auth.T
 	}
 
 	// Try cached token
-	if !opts.ForceRefresh && h.tokenCache != nil {
-		cached, err := h.tokenCache.Get(ctx, flow, fingerprint, scope)
+	tc := h.profileTokenCache(ctx)
+	if !opts.ForceRefresh && tc != nil {
+		cached, err := tc.Get(ctx, flow, fingerprint, scope)
 		if err == nil && cached != nil && cached.IsValidFor(opts.MinValidFor) {
 			return cached, nil
 		}
 	}
 
 	// Try refresh
-	refreshData, err := h.secretStore.Get(ctx, h.secretKey(secretKeyRefreshSuffix))
+	refreshData, err := h.secretStore.Get(ctx, h.profileSecretKey(ctx, secretKeyRefreshSuffix))
 	if err == nil && len(refreshData) > 0 {
 		tokenResp, refreshErr := h.refreshAccessToken(ctx, string(refreshData), scope)
 		if refreshErr == nil {
 			token := h.tokenRespToToken(tokenResp, flow, scope)
-			if h.tokenCache != nil {
-				_ = h.tokenCache.Set(ctx, flow, fingerprint, scope, token)
+			if tc != nil {
+				_ = tc.Set(ctx, flow, fingerprint, scope, token)
 			}
 			if h.cfg.TokenExchange != nil {
 				if derived, exchangeErr := h.executeTokenExchange(ctx, tokenResp.AccessToken); exchangeErr == nil {
@@ -350,6 +429,34 @@ type handlerMetadata struct {
 	ExpiresAt     time.Time    `json:"expiresAt"`
 	Scopes        []string     `json:"scopes"`
 	LastLoginFlow auth.Flow    `json:"lastLoginFlow,omitempty"`
+}
+
+// unmarshalMetadata deserializes metadata JSON, handling field name differences
+// between the generic oauth2 handler and plugin auth handlers.
+// Plugin handlers use "refreshTokenExpiresAt" (vs "expiresAt") and
+// "loginFlow" (vs "lastLoginFlow").
+func unmarshalMetadata(data []byte) (*handlerMetadata, error) {
+	var meta handlerMetadata
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil, err
+	}
+
+	// If ExpiresAt is zero, try the plugin handler's field name.
+	if meta.ExpiresAt.IsZero() {
+		var compat struct {
+			RefreshTokenExpiresAt time.Time `json:"refreshTokenExpiresAt"`
+			LoginFlow             auth.Flow `json:"loginFlow"`
+		}
+		if err := json.Unmarshal(data, &compat); err == nil {
+			if !compat.RefreshTokenExpiresAt.IsZero() {
+				meta.ExpiresAt = compat.RefreshTokenExpiresAt
+			}
+			if meta.LastLoginFlow == "" && compat.LoginFlow != "" {
+				meta.LastLoginFlow = compat.LoginFlow
+			}
+		}
+	}
+	return &meta, nil
 }
 
 type exchangeResult struct {
@@ -772,7 +879,7 @@ func (h *Handler) verifyToken(ctx context.Context, accessToken string) (*auth.Cl
 
 func (h *Handler) storeTokens(ctx context.Context, resp *tokenResponse, claims *auth.Claims, expiresAt time.Time, flow auth.Flow, scopes []string) error {
 	if resp.RefreshToken != "" {
-		if err := h.secretStore.Set(ctx, h.secretKey(secretKeyRefreshSuffix), []byte(resp.RefreshToken)); err != nil {
+		if err := h.secretStore.Set(ctx, h.profileSecretKey(ctx, secretKeyRefreshSuffix), []byte(resp.RefreshToken)); err != nil {
 			return fmt.Errorf("store refresh token: %w", err)
 		}
 	}
@@ -781,13 +888,14 @@ func (h *Handler) storeTokens(ctx context.Context, resp *tokenResponse, claims *
 	if err != nil {
 		return fmt.Errorf("marshal metadata: %w", err)
 	}
-	if err := h.secretStore.Set(ctx, h.secretKey(secretKeyMetadataSuffix), metaBytes); err != nil {
+	if err := h.secretStore.Set(ctx, h.profileSecretKey(ctx, secretKeyMetadataSuffix), metaBytes); err != nil {
 		return fmt.Errorf("store metadata: %w", err)
 	}
-	if h.tokenCache != nil {
+	tc := h.profileTokenCache(ctx)
+	if tc != nil {
 		fingerprint := auth.FingerprintHash(h.cfg.ClientID)
 		scope := strings.Join(scopes, " ")
-		return h.tokenCache.Set(ctx, flow, fingerprint, scope, h.tokenRespToToken(resp, flow, scope))
+		return tc.Set(ctx, flow, fingerprint, scope, h.tokenRespToToken(resp, flow, scope))
 	}
 	return nil
 }
@@ -804,12 +912,12 @@ func (h *Handler) storeDerivedToken(ctx context.Context, result *exchangeResult,
 	if err != nil {
 		return fmt.Errorf("marshal derived token: %w", err)
 	}
-	if setErr := h.secretStore.Set(ctx, h.secretKey(derivedTokenSuffix), data); setErr != nil {
+	if setErr := h.secretStore.Set(ctx, h.profileSecretKey(ctx, derivedTokenSuffix), data); setErr != nil {
 		return setErr
 	}
 	// Persist the extracted username so it survives process restarts.
 	if result.Username != "" {
-		if setErr := h.secretStore.Set(ctx, h.secretKey(derivedUsernameSuffix), []byte(result.Username)); setErr != nil {
+		if setErr := h.secretStore.Set(ctx, h.profileSecretKey(ctx, derivedUsernameSuffix), []byte(result.Username)); setErr != nil {
 			h.logger.V(1).Info("failed to persist derived username", "error", setErr)
 		}
 	}
@@ -817,7 +925,7 @@ func (h *Handler) storeDerivedToken(ctx context.Context, result *exchangeResult,
 }
 
 func (h *Handler) loadDerivedToken(ctx context.Context) (*auth.Token, error) {
-	data, err := h.secretStore.Get(ctx, h.secretKey(derivedTokenSuffix))
+	data, err := h.secretStore.Get(ctx, h.profileSecretKey(ctx, derivedTokenSuffix))
 	if err != nil {
 		return nil, err
 	}
@@ -827,22 +935,18 @@ func (h *Handler) loadDerivedToken(ctx context.Context) (*auth.Token, error) {
 	}
 	// Restore the derived username so BridgeAuthToRegistry uses the correct
 	// username even when the token was loaded from cache across process restarts.
-	if usernameData, usernameErr := h.secretStore.Get(ctx, h.secretKey(derivedUsernameSuffix)); usernameErr == nil && len(usernameData) > 0 {
+	if usernameData, usernameErr := h.secretStore.Get(ctx, h.profileSecretKey(ctx, derivedUsernameSuffix)); usernameErr == nil && len(usernameData) > 0 {
 		h.cfg.RegistryUsername = string(usernameData)
 	}
 	return &token, nil
 }
 
 func (h *Handler) loadMetadata(ctx context.Context) (*handlerMetadata, error) {
-	data, err := h.secretStore.Get(ctx, h.secretKey(secretKeyMetadataSuffix))
+	data, err := h.secretStore.Get(ctx, h.profileSecretKey(ctx, secretKeyMetadataSuffix))
 	if err != nil {
 		return nil, err
 	}
-	var meta handlerMetadata
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return nil, err
-	}
-	return &meta, nil
+	return unmarshalMetadata(data)
 }
 
 // ---------- refresh ----------
@@ -901,7 +1005,45 @@ func (h *Handler) postTokenEndpoint(ctx context.Context, data url.Values) (*toke
 // ---------- utilities ----------
 
 func (h *Handler) secretKey(suffix string) string {
-	return secretKeyPrefix + h.cfg.Name + "." + suffix
+	return h.secretKeyPrefix + h.cfg.Name + "." + suffix
+}
+
+// secretKeyWithProfile returns a secret key that incorporates the profile.
+// If profile is empty, falls back to the default (no profile) key.
+// Pattern: scafctl.auth.oauth2.<handler>.<profile>.<suffix>
+func (h *Handler) secretKeyWithProfile(profile, suffix string) string {
+	if profile == "" {
+		return h.secretKey(suffix)
+	}
+	return h.secretKeyPrefix + h.cfg.Name + "." + profile + "." + suffix
+}
+
+// profileSecretKey returns the secret key for the given suffix, incorporating
+// any profile found in the context.
+func (h *Handler) profileSecretKey(ctx context.Context, suffix string) string {
+	return h.secretKeyWithProfile(auth.ProfileFromContext(ctx), suffix)
+}
+
+// tokenCacheForProfile returns the token cache prefix for the given profile.
+func (h *Handler) tokenCacheForProfile(profile string) string {
+	if profile == "" {
+		return h.secretKeyPrefix + h.cfg.Name + "." + tokenCacheSuffix
+	}
+	return h.secretKeyPrefix + h.cfg.Name + "." + profile + "." + tokenCacheSuffix
+}
+
+// profileTokenCache returns a TokenCache for the active profile in context.
+// If no profile is set, returns the default token cache.
+func (h *Handler) profileTokenCache(ctx context.Context) *auth.TokenCache {
+	profile := auth.ProfileFromContext(ctx)
+	if profile == "" {
+		return h.tokenCache
+	}
+	if h.secretStore == nil {
+		return nil
+	}
+	prefix := h.tokenCacheForProfile(profile)
+	return auth.NewTokenCache(h.secretStore, prefix)
 }
 
 func (h *Handler) ensureSecrets() error {

@@ -23,7 +23,6 @@ import (
 	configcmd "github.com/oakwood-commons/scafctl/pkg/cmd/scafctl/config"
 	credhelpercmd "github.com/oakwood-commons/scafctl/pkg/cmd/scafctl/credentialhelper"
 	"github.com/oakwood-commons/scafctl/pkg/cmd/scafctl/eval"
-	examplescmd "github.com/oakwood-commons/scafctl/pkg/cmd/scafctl/examples"
 	"github.com/oakwood-commons/scafctl/pkg/cmd/scafctl/explain"
 	"github.com/oakwood-commons/scafctl/pkg/cmd/scafctl/get"
 	inspectcmd "github.com/oakwood-commons/scafctl/pkg/cmd/scafctl/inspect"
@@ -162,6 +161,12 @@ type RootOptions struct {
 	// alongside built-in handlers during PersistentPreRunE.
 	AuthPluginDirs []string
 
+	// BuiltinAuthHandlers are pre-built auth handler instances that the
+	// embedder compiles into the binary. They are registered eagerly at
+	// startup before config-based or plugin handlers, and appear in
+	// 'auth list' immediately.
+	BuiltinAuthHandlers []auth.Handler
+
 	// ActionDiscoveryFileNames overrides the file names used by "run action"
 	// auto-discovery. When empty, the defaults from
 	// settings.ActionFileNamesFor are used.
@@ -217,12 +222,14 @@ func Root(opts *RootOptions) (*cobra.Command, func()) {
 	var (
 		configPath        = opts.ConfigPath
 		cwdFlag           string
+		authProfileFlag   string
 		debugFlag         bool
 		logFormat         = "console"
 		logFile           string
 		otelInsecure      bool
 		telShutdown       func(context.Context) error
 		authPluginClients []*plugin.AuthHandlerClient
+		authLazyHandlers  []*plugin.LazyAuthHandlerWrapper
 		authClientsMu     sync.Mutex // guards authPluginClients from concurrent fallback resolvers
 	)
 
@@ -238,8 +245,7 @@ func Root(opts *RootOptions) (*cobra.Command, func()) {
 	// Update package-level solution discovery lists so any code reading them
 	// directly (e.g., PossibleSolutionPaths, MCP capabilities) reflects the
 	// embedder's binary name rather than the hardcoded default.
-	settings.RootSolutionFolders = settings.SolutionFoldersFor(binaryName)
-	settings.SolutionFileNames = settings.SolutionFileNamesFor(binaryName)
+	settings.SetSolutionDiscovery(settings.SolutionFoldersFor(binaryName), settings.SolutionFileNamesFor(binaryName))
 
 	// Wire embedder-supplied action discovery file names into cliParams
 	// so they are available via settings.FromContext during command execution.
@@ -421,6 +427,11 @@ func Root(opts *RootOptions) (*cobra.Command, func()) {
 				ctx = config.WithBaseDefaults(ctx, opts.ConfigDefaults)
 			}
 
+			// Validate auth profile names in config
+			if profileErr := auth.ValidateAuthProfiles(cfg); profileErr != nil {
+				w.Warningf("config: %v", profileErr)
+			}
+
 			// ── Resolve --cwd flag and inject into context ──
 			// This must happen before any path resolution so that downstream
 			// commands see the correct logical working directory.
@@ -455,6 +466,7 @@ func Root(opts *RootOptions) (*cobra.Command, func()) {
 			sharedSecretStore, secretErr := secrets.New(
 				secrets.WithRequireSecureKeyring(cfg.Settings.RequireSecureKeyring),
 				secrets.WithLogger(*lgr),
+				secrets.WithOrphanCleanup(true),
 			)
 			if secretErr != nil {
 				lgr.V(1).Info("shared secrets store unavailable; auth handlers will create their own", "error", secretErr)
@@ -462,6 +474,13 @@ func Root(opts *RootOptions) (*cobra.Command, func()) {
 
 			// Initialize auth registry
 			authRegistry := auth.NewRegistry()
+
+			// Register embedder-provided builtin auth handlers first
+			for _, h := range opts.BuiltinAuthHandlers {
+				if regErr := authRegistry.Register(h); regErr != nil {
+					lgr.V(1).Info("failed to register builtin auth handler", "name", h.Name(), "error", regErr)
+				}
+			}
 
 			// Register custom OAuth2 handlers from config
 			for _, customCfg := range cfg.Auth.CustomOAuth2 {
@@ -526,6 +545,27 @@ func Root(opts *RootOptions) (*cobra.Command, func()) {
 
 			ctx = auth.WithRegistry(ctx, authRegistry)
 
+			// ── Resolve global auth profile ──
+			// Precedence: --auth-profile flag > env var > (per-handler config is resolved later)
+			rawAuthProfile := authProfileFlag
+			if !cCmd.Flags().Changed("auth-profile") {
+				if envProfile := os.Getenv(envPrefix + "_AUTH_PROFILE"); envProfile != "" {
+					rawAuthProfile = envProfile
+				}
+			}
+			if rawAuthProfile != "" {
+				normalized := auth.NormalizeProfileName(rawAuthProfile)
+				if normalized != "" {
+					if profileErr := auth.ValidateProfileName(normalized); profileErr != nil {
+						w.ErrorWithExit(fmt.Sprintf("invalid --auth-profile value: %v", profileErr))
+						return
+					}
+				}
+				// Store the raw value so ResolveActiveProfile can detect explicit
+				// built-in/default overrides and skip config fallback.
+				ctx = auth.WithGlobalProfile(ctx, rawAuthProfile)
+			}
+
 			// Wire plugin signature policy unconditionally so all downstream
 			// plugin operations (auth handlers, providers, solution prepare)
 			// respect the embedder's policy regardless of feature flags.
@@ -557,6 +597,11 @@ func Root(opts *RootOptions) (*cobra.Command, func()) {
 				hostDeps := plugin.HostDepsFromAuthRegistry(authRegistry)
 				if hostDeps != nil && secretErr == nil {
 					hostDeps.SecretStore = sharedSecretStore
+				}
+				if hostDeps != nil {
+					hostDeps.ProfileResolverFunc = func(handlerName string) string {
+						return auth.ResolveActiveProfile(cCmd.Context(), handlerName)
+					}
 				}
 				clientOpts := []plugin.ClientOption{plugin.WithHostDeps(hostDeps)}
 
@@ -612,6 +657,54 @@ func Root(opts *RootOptions) (*cobra.Command, func()) {
 					}
 					return handler, nil
 				})
+			}
+
+			// ── Register lazy wrappers for cached official auth handler plugins ──
+			// If an official auth handler has a cached binary (previously
+			// downloaded via install or login), register a lazy wrapper now.
+			// This makes it visible in registry.List() without spawning any
+			// subprocesses. The plugin is started on first actual use.
+			if officialReg := authofficial.RegistryFromContext(ctx); officialReg != nil {
+				pluginCfg := &plugin.ProviderConfig{
+					Quiet:      cliParams.IsQuiet,
+					NoColor:    cliParams.NoColor,
+					BinaryName: binaryName,
+				}
+				hostDeps := plugin.HostDepsFromAuthRegistry(authRegistry)
+				if hostDeps != nil && secretErr == nil {
+					hostDeps.SecretStore = sharedSecretStore
+				}
+				if hostDeps != nil {
+					hostDeps.ProfileResolverFunc = func(handlerName string) string {
+						return auth.ResolveActiveProfile(cCmd.Context(), handlerName)
+					}
+				}
+				clientOpts := []plugin.ClientOption{plugin.WithHostDeps(hostDeps)}
+				cache := plugin.NewCache(settings.PluginCacheDirFor(binaryName))
+
+				for _, name := range officialReg.Names() {
+					if authRegistry.Has(name) {
+						continue // already registered (e.g., via config or plugin dir)
+					}
+					cacheKey := plugin.PluginCacheKey(name, solution.PluginKindAuthHandler)
+					binPath, _, ok := cache.GetLatestBinary(cacheKey)
+					if !ok {
+						continue // not cached, skip (will use fallback on demand)
+					}
+					lazy := plugin.NewLazyAuthHandlerWrapper(plugin.LazyAuthHandlerConfig{
+						Name:             name,
+						BinPath:          binPath,
+						PluginCfg:        pluginCfg,
+						ClientOpts:       clientOpts,
+						OfficialRegistry: officialReg,
+					})
+					lazy.SetContext(ctx)
+					if err := authRegistry.Register(lazy); err != nil {
+						lgr.V(1).Info("failed to register lazy auth handler", "handler", name, "error", err)
+						continue
+					}
+					authLazyHandlers = append(authLazyHandlers, lazy)
+				}
 			}
 
 			// ── Wire official provider registry for auto-resolution ──
@@ -717,6 +810,7 @@ func Root(opts *RootOptions) (*cobra.Command, func()) {
 	cCmd.PersistentFlags().String("pprof-output-dir", "./", "directory path to save the profiler.prof file (default: current working directory)")
 	cCmd.PersistentFlags().String("otel-endpoint", "", "OpenTelemetry OTLP exporter endpoint (e.g. localhost:4317). Overrides OTEL_EXPORTER_OTLP_ENDPOINT")
 	cCmd.PersistentFlags().BoolVar(&otelInsecure, "otel-insecure", false, "Disable TLS for OTLP gRPC connection (development only)")
+	cCmd.PersistentFlags().StringVar(&authProfileFlag, "auth-profile", "", "Override the auth profile for all auth operations (e.g. work, personal)")
 
 	if err := cCmd.PersistentFlags().MarkHidden("pprof"); err != nil {
 		return nil, func() {}
@@ -762,7 +856,6 @@ func Root(opts *RootOptions) (*cobra.Command, func()) {
 
 	// Other Commands (no group — shown under "Additional Commands:")
 	cCmd.AddCommand(version.CommandVersion(cliParams, ioStreams, binaryName, opts.VersionExtra))
-	cCmd.AddCommand(examplescmd.CommandExamples(cliParams, ioStreams, binaryName))
 	cCmd.AddCommand(options.CommandOptions(cliParams, ioStreams, binaryName))
 
 	// cleanup releases auth handler plugins and telemetry. It is safe to call
@@ -773,6 +866,11 @@ func Root(opts *RootOptions) (*cobra.Command, func()) {
 	cleanup = func() {
 		cleanupOnce.Do(func() {
 			plugin.KillAllAuthHandlers(authPluginClients)
+			for _, lazy := range authLazyHandlers {
+				if c := lazy.Client(); c != nil {
+					c.Kill()
+				}
+			}
 			if telShutdown != nil {
 				shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/MakeNowJust/heredoc/v2"
+	"github.com/oakwood-commons/scafctl/pkg/auth"
 	"github.com/oakwood-commons/scafctl/pkg/exitcode"
 	"github.com/oakwood-commons/scafctl/pkg/settings"
 	"github.com/oakwood-commons/scafctl/pkg/terminal"
@@ -19,10 +20,11 @@ import (
 // CommandLogout creates the 'auth logout' command.
 func CommandLogout(cliParams *settings.Run, ioStreams *terminal.IOStreams, _ string) *cobra.Command {
 	var (
-		all    bool
-		force  bool
-		dryRun bool
-		yes    bool
+		all     bool
+		force   bool
+		dryRun  bool
+		yes     bool
+		profile string
 	)
 
 	cmd := &cobra.Command{
@@ -72,18 +74,52 @@ func CommandLogout(cliParams *settings.Run, ioStreams *terminal.IOStreams, _ str
 				return fmt.Errorf("accepts 1 arg(s) (handler name), received %d — or use --all to log out from all handlers", len(args))
 			}
 			return nil
-		},
-		RunE: func(cmd *cobra.Command, args []string) error {
+		}, ValidArgsFunction: func(cmd *cobra.Command, args []string, _ string) ([]string, cobra.ShellCompDirective) {
+			if len(args) > 0 {
+				return nil, cobra.ShellCompDirectiveNoFileComp
+			}
+			return listKnownHandlers(cmd.Context()), cobra.ShellCompDirectiveNoFileComp
+		}, RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			w := writer.FromContext(ctx)
 			if w == nil {
 				return fmt.Errorf("writer not initialized in context")
 			}
 
+			// Resolve effective profile: per-command --profile > global --auth-profile > config activeProfile
+			// Track whether profile was explicitly set (even if normalized to empty/default).
+			profileExplicit := cmd.Flags().Changed("profile")
+			effectiveProfile := auth.NormalizeProfileName(profile)
+			if effectiveProfile == "" && !profileExplicit {
+				effectiveProfile = auth.NormalizeProfileName(auth.GlobalProfileFromContext(ctx))
+			}
+			if effectiveProfile != "" {
+				if err := auth.ValidateProfileName(effectiveProfile); err != nil {
+					w.Errorf("%v", err)
+					return exitcode.WithCode(err, exitcode.InvalidInput)
+				}
+				ctx = auth.WithProfile(ctx, effectiveProfile)
+			}
+
+			// For single-handler logout, fall back to config activeProfile
+			if effectiveProfile == "" && !profileExplicit && !all && len(args) > 0 {
+				if configProfile := auth.ResolveActiveProfile(ctx, args[0]); configProfile != "" {
+					ctx = auth.WithProfile(ctx, configProfile)
+				}
+			}
+
 			var handlerNames []string
 			if all {
 				handlerNames = listHandlers(ctx)
 				if len(handlerNames) == 0 {
+					unconfigured := listUnconfiguredOfficialHandlers(ctx)
+					if len(unconfigured) > 0 {
+						w.Infof("No active authentication sessions.")
+						w.Infof("")
+						w.Infof("Official auth handlers: %s", strings.Join(unconfigured, ", "))
+						w.Infof("Run '%s auth login <handler>' to authenticate (downloads automatically on first use).", cliParams.BinaryName)
+						return nil
+					}
 					err := fmt.Errorf("no auth handlers registered")
 					w.Errorf("%v", err)
 					return exitcode.WithCode(err, exitcode.GeneralError)
@@ -159,5 +195,6 @@ func CommandLogout(cliParams *settings.Run, ioStreams *terminal.IOStreams, _ str
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "Clear stored credentials even if not currently authenticated")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be removed without actually removing credentials")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip the confirmation prompt when using --all")
+	cmd.Flags().StringVar(&profile, "profile", "", "Named profile for isolated credential storage (e.g. work, personal)")
 	return cmd
 }

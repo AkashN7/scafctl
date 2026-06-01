@@ -852,3 +852,223 @@ func TestHandler_CallbackOpts(t *testing.T) {
 		})
 	}
 }
+
+func TestWithSecretKeyPrefix(t *testing.T) {
+	srv := newTestOAuthServer(t)
+	defer srv.Close()
+	store := secrets.NewMockStore()
+
+	// Write metadata under the plugin-style prefix
+	pluginPrefix := "scafctl.auth."
+	meta := handlerMetadata{Claims: &auth.Claims{Username: "testuser"}, ExpiresAt: time.Now().Add(1 * time.Hour), Scopes: []string{"read"}}
+	metaBytes, err := json.Marshal(meta)
+	require.NoError(t, err)
+	require.NoError(t, store.Set(context.Background(), pluginPrefix+"test-provider.metadata", metaBytes))
+
+	// Default prefix should NOT find the metadata
+	cfg := config.CustomOAuth2Config{Name: "test-provider", TokenURL: srv.URL + "/token", ClientID: "cid"}
+	hDefault, err := New(cfg, WithSecretStore(store))
+	require.NoError(t, err)
+	status, err := hDefault.Status(context.Background())
+	require.NoError(t, err)
+	assert.False(t, status.Authenticated)
+
+	// Custom prefix should find it
+	hCustom, err := New(cfg, WithSecretStore(store), WithSecretKeyPrefix(pluginPrefix))
+	require.NoError(t, err)
+	status, err = hCustom.Status(context.Background())
+	require.NoError(t, err)
+	assert.True(t, status.Authenticated)
+	assert.Equal(t, "testuser", status.Claims.Username)
+}
+
+func TestUnmarshalMetadata_PluginFormat(t *testing.T) {
+	// Plugin handler metadata uses different field names
+	pluginJSON := `{
+		"refreshTokenExpiresAt": "2026-08-13T01:13:46Z",
+		"loginFlow": "interactive",
+		"sessionId": "abc123",
+		"tenantId": "tenant1",
+		"clientId": "client1"
+	}`
+	meta, err := unmarshalMetadata([]byte(pluginJSON))
+	require.NoError(t, err)
+	assert.Equal(t, time.Date(2026, 8, 13, 1, 13, 46, 0, time.UTC), meta.ExpiresAt)
+	assert.Equal(t, auth.FlowInteractive, meta.LastLoginFlow)
+}
+
+func TestUnmarshalMetadata_NativeFormat(t *testing.T) {
+	meta := handlerMetadata{
+		Claims:        &auth.Claims{Username: "testuser"},
+		ExpiresAt:     time.Date(2026, 8, 13, 1, 13, 46, 0, time.UTC),
+		Scopes:        []string{"read"},
+		LastLoginFlow: auth.FlowDeviceCode,
+	}
+	data, err := json.Marshal(meta)
+	require.NoError(t, err)
+
+	result, err := unmarshalMetadata(data)
+	require.NoError(t, err)
+	assert.Equal(t, meta.ExpiresAt, result.ExpiresAt)
+	assert.Equal(t, auth.FlowDeviceCode, result.LastLoginFlow)
+	assert.Equal(t, "testuser", result.Claims.Username)
+}
+
+func TestUnmarshalMetadata_EmptyJSON(t *testing.T) {
+	meta, err := unmarshalMetadata([]byte("{}"))
+	require.NoError(t, err)
+	assert.True(t, meta.ExpiresAt.IsZero())
+}
+
+func TestUnmarshalMetadata_InvalidJSON(t *testing.T) {
+	_, err := unmarshalMetadata([]byte("not json"))
+	assert.Error(t, err)
+}
+
+func TestHandler_Status_Reason_NoSecretStore(t *testing.T) {
+	cfg := config.CustomOAuth2Config{Name: "test-provider", TokenURL: "http://example.com/token", ClientID: "cid"}
+	h := &Handler{cfg: cfg, secretKeyPrefix: secretKeyPrefix}
+	status, err := h.Status(context.Background())
+	require.NoError(t, err)
+	assert.False(t, status.Authenticated)
+	assert.Equal(t, "secrets store unavailable", status.Reason)
+}
+
+func TestHandler_Status_Reason_NotLoggedIn(t *testing.T) {
+	srv := newTestOAuthServer(t)
+	defer srv.Close()
+	h, _ := newTestHandler(t, srv, nil)
+	status, err := h.Status(context.Background())
+	require.NoError(t, err)
+	assert.False(t, status.Authenticated)
+	assert.Equal(t, "not logged in", status.Reason)
+}
+
+func TestHandler_Status_Reason_CorruptMetadata(t *testing.T) {
+	srv := newTestOAuthServer(t)
+	defer srv.Close()
+	h, store := newTestHandler(t, srv, nil)
+	require.NoError(t, store.Set(context.Background(), secretKeyPrefix+"test-provider.metadata", []byte("not json")))
+	status, err := h.Status(context.Background())
+	require.NoError(t, err)
+	assert.False(t, status.Authenticated)
+	assert.Equal(t, "metadata corrupt or unreadable", status.Reason)
+}
+
+func TestHandler_Status_Reason_Expired(t *testing.T) {
+	srv := newTestOAuthServer(t)
+	defer srv.Close()
+	h, store := newTestHandler(t, srv, nil)
+	meta := handlerMetadata{Claims: &auth.Claims{Username: "testuser"}, ExpiresAt: time.Now().Add(-1 * time.Hour)}
+	metaBytes, _ := json.Marshal(meta)
+	_ = store.Set(context.Background(), secretKeyPrefix+"test-provider.metadata", metaBytes)
+	status, err := h.Status(context.Background())
+	require.NoError(t, err)
+	assert.False(t, status.Authenticated)
+	assert.Equal(t, "session expired", status.Reason)
+}
+
+func TestHandler_ListCachedTokens_Empty(t *testing.T) {
+	srv := newTestOAuthServer(t)
+	defer srv.Close()
+	h, _ := newTestHandler(t, srv, nil)
+
+	tokens, err := h.ListCachedTokens(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, tokens)
+}
+
+func TestHandler_ListCachedTokens_WithTokens(t *testing.T) {
+	srv := newTestOAuthServer(t)
+	defer srv.Close()
+	h, _ := newTestHandler(t, srv, nil)
+
+	// Store a token in the cache
+	token := &auth.Token{
+		AccessToken: "test-access-token",
+		TokenType:   "Bearer",
+		ExpiresAt:   time.Now().Add(time.Hour),
+		Scope:       "read",
+		Flow:        auth.FlowInteractive,
+		SessionID:   "sess-123",
+		CachedAt:    time.Now(),
+	}
+	err := h.tokenCache.Set(context.Background(), auth.FlowInteractive, "fp1", "read", token)
+	require.NoError(t, err)
+
+	tokens, err := h.ListCachedTokens(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tokens, 1)
+	assert.Equal(t, "test-provider", tokens[0].Handler)
+	assert.Equal(t, "access", tokens[0].TokenKind)
+	assert.Equal(t, "read", tokens[0].Scope)
+	assert.Equal(t, "Bearer", tokens[0].TokenType)
+	assert.Equal(t, auth.FlowInteractive, tokens[0].Flow)
+	assert.False(t, tokens[0].IsExpired)
+}
+
+func TestHandler_ListCachedTokens_NilCache(t *testing.T) {
+	h := &Handler{cfg: config.CustomOAuth2Config{Name: "no-cache"}, secretErr: fmt.Errorf("no keyring"), logger: logr.Discard()}
+
+	tokens, err := h.ListCachedTokens(context.Background())
+	require.NoError(t, err)
+	assert.Nil(t, tokens)
+}
+
+func TestHandler_PurgeExpiredTokens_Empty(t *testing.T) {
+	srv := newTestOAuthServer(t)
+	defer srv.Close()
+	h, _ := newTestHandler(t, srv, nil)
+
+	n, err := h.PurgeExpiredTokens(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, n)
+}
+
+func TestHandler_PurgeExpiredTokens_RemovesExpired(t *testing.T) {
+	srv := newTestOAuthServer(t)
+	defer srv.Close()
+	h, _ := newTestHandler(t, srv, nil)
+
+	// Store an expired token
+	expired := &auth.Token{
+		AccessToken: "expired-token",
+		TokenType:   "Bearer",
+		ExpiresAt:   time.Now().Add(-time.Hour),
+		Scope:       "read",
+		Flow:        auth.FlowInteractive,
+		CachedAt:    time.Now().Add(-2 * time.Hour),
+	}
+	err := h.tokenCache.Set(context.Background(), auth.FlowInteractive, "fp1", "read", expired)
+	require.NoError(t, err)
+
+	// Store a valid token
+	valid := &auth.Token{
+		AccessToken: "valid-token",
+		TokenType:   "Bearer",
+		ExpiresAt:   time.Now().Add(time.Hour),
+		Scope:       "write",
+		Flow:        auth.FlowInteractive,
+		CachedAt:    time.Now(),
+	}
+	err = h.tokenCache.Set(context.Background(), auth.FlowInteractive, "fp2", "write", valid)
+	require.NoError(t, err)
+
+	n, err := h.PurgeExpiredTokens(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+
+	// Verify valid token is still there
+	tokens, err := h.ListCachedTokens(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, tokens, 1)
+	assert.Equal(t, "write", tokens[0].Scope)
+}
+
+func TestHandler_PurgeExpiredTokens_NilCache(t *testing.T) {
+	h := &Handler{cfg: config.CustomOAuth2Config{Name: "no-cache"}, secretErr: fmt.Errorf("no keyring"), logger: logr.Discard()}
+
+	n, err := h.PurgeExpiredTokens(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, n)
+}

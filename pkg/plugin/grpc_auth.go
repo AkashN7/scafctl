@@ -109,9 +109,30 @@ func (s *AuthHandlerGRPCServer) GetAuthHandlers(ctx context.Context, _ *proto.Ge
 	return resp, nil
 }
 
+// withNormalizedProfile normalizes and validates the profile from the request,
+// then injects it into the context. This provides defense-in-depth validation
+// at the gRPC boundary even though the host should already validate.
+func withNormalizedProfile(ctx context.Context, profile string) (context.Context, error) {
+	normalized := auth.NormalizeProfileName(profile)
+	if normalized != "" {
+		if err := auth.ValidateProfileName(normalized); err != nil {
+			return ctx, err
+		}
+	}
+	return auth.WithProfile(ctx, normalized), nil
+}
+
 // Login implements the Login RPC with server-side streaming.
 func (s *AuthHandlerGRPCServer) Login(req *proto.LoginRequest, stream grpc.ServerStreamingServer[proto.LoginStreamMessage]) error {
 	ctx := stream.Context()
+	ctx, err := withNormalizedProfile(ctx, req.Profile)
+	if err != nil {
+		return stream.Send(&proto.LoginStreamMessage{
+			Payload: &proto.LoginStreamMessage_Error{
+				Error: fmt.Sprintf("invalid profile: %v", err),
+			},
+		})
+	}
 
 	// Build the device code callback that sends prompts over the stream.
 	deviceCodeCb := func(prompt DeviceCodePrompt) {
@@ -156,6 +177,10 @@ func (s *AuthHandlerGRPCServer) Login(req *proto.LoginRequest, stream grpc.Serve
 
 // Logout implements the Logout RPC.
 func (s *AuthHandlerGRPCServer) Logout(ctx context.Context, req *proto.LogoutRequest) (*proto.LogoutResponse, error) {
+	ctx, err := withNormalizedProfile(ctx, req.Profile)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid profile: %v", err)
+	}
 	if err := s.Impl.Logout(ctx, req.HandlerName); err != nil {
 		return nil, err
 	}
@@ -164,6 +189,10 @@ func (s *AuthHandlerGRPCServer) Logout(ctx context.Context, req *proto.LogoutReq
 
 // GetStatus implements the GetStatus RPC.
 func (s *AuthHandlerGRPCServer) GetStatus(ctx context.Context, req *proto.GetStatusRequest) (*proto.GetStatusResponse, error) {
+	ctx, err := withNormalizedProfile(ctx, req.Profile)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid profile: %v", err)
+	}
 	status, err := s.Impl.GetStatus(ctx, req.HandlerName)
 	if err != nil {
 		return nil, err
@@ -173,6 +202,10 @@ func (s *AuthHandlerGRPCServer) GetStatus(ctx context.Context, req *proto.GetSta
 
 // GetToken implements the GetToken RPC.
 func (s *AuthHandlerGRPCServer) GetToken(ctx context.Context, req *proto.GetTokenRequest) (*proto.GetTokenResponse, error) {
+	ctx, err := withNormalizedProfile(ctx, req.Profile)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid profile: %v", err)
+	}
 	tokenReq := TokenRequest{
 		Scope:        req.Scope,
 		MinValidFor:  time.Duration(req.MinValidForSeconds) * time.Second,
@@ -187,6 +220,10 @@ func (s *AuthHandlerGRPCServer) GetToken(ctx context.Context, req *proto.GetToke
 
 // ListCachedTokens implements the ListCachedTokens RPC.
 func (s *AuthHandlerGRPCServer) ListCachedTokens(ctx context.Context, req *proto.ListCachedTokensRequest) (*proto.ListCachedTokensResponse, error) {
+	ctx, err := withNormalizedProfile(ctx, req.Profile)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid profile: %v", err)
+	}
 	tokens, err := s.Impl.ListCachedTokens(ctx, req.HandlerName)
 	if err != nil {
 		return nil, err
@@ -202,6 +239,10 @@ func (s *AuthHandlerGRPCServer) ListCachedTokens(ctx context.Context, req *proto
 
 // PurgeExpiredTokens implements the PurgeExpiredTokens RPC.
 func (s *AuthHandlerGRPCServer) PurgeExpiredTokens(ctx context.Context, req *proto.PurgeExpiredTokensRequest) (*proto.PurgeExpiredTokensResponse, error) {
+	ctx, err := withNormalizedProfile(ctx, req.Profile)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid profile: %v", err)
+	}
 	count, err := s.Impl.PurgeExpiredTokens(ctx, req.HandlerName)
 	if err != nil {
 		return nil, err
@@ -242,6 +283,7 @@ func (s *AuthHandlerGRPCServer) ConfigureAuthHandler(ctx context.Context, req *p
 		Quiet:      req.Quiet,
 		NoColor:    req.NoColor,
 		BinaryName: req.BinaryName,
+		Profile:    req.Profile,
 		Settings:   settings,
 	}
 	if req.HostServiceId != 0 && s.broker != nil {
@@ -310,6 +352,7 @@ func (c *AuthHandlerGRPCClient) Login(ctx context.Context, handlerName string, r
 		Scopes:         req.Scopes,
 		Flow:           string(req.Flow),
 		TimeoutSeconds: int64(req.Timeout / time.Second),
+		Profile:        auth.ProfileFromContext(ctx),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("login RPC failed: %w", err)
@@ -346,13 +389,13 @@ func (c *AuthHandlerGRPCClient) Login(ctx context.Context, handlerName string, r
 
 // Logout implements AuthHandlerPlugin.Logout.
 func (c *AuthHandlerGRPCClient) Logout(ctx context.Context, handlerName string) error {
-	_, err := c.client.Logout(ctx, &proto.LogoutRequest{HandlerName: handlerName})
+	_, err := c.client.Logout(ctx, &proto.LogoutRequest{HandlerName: handlerName, Profile: auth.ProfileFromContext(ctx)})
 	return err
 }
 
 // GetStatus implements AuthHandlerPlugin.GetStatus.
 func (c *AuthHandlerGRPCClient) GetStatus(ctx context.Context, handlerName string) (*auth.Status, error) {
-	resp, err := c.client.GetStatus(ctx, &proto.GetStatusRequest{HandlerName: handlerName})
+	resp, err := c.client.GetStatus(ctx, &proto.GetStatusRequest{HandlerName: handlerName, Profile: auth.ProfileFromContext(ctx)})
 	if err != nil {
 		return nil, err
 	}
@@ -366,6 +409,7 @@ func (c *AuthHandlerGRPCClient) GetToken(ctx context.Context, handlerName string
 		Scope:              req.Scope,
 		MinValidForSeconds: int64(req.MinValidFor / time.Second),
 		ForceRefresh:       req.ForceRefresh,
+		Profile:            auth.ProfileFromContext(ctx),
 	})
 	if err != nil {
 		return nil, err
@@ -375,7 +419,7 @@ func (c *AuthHandlerGRPCClient) GetToken(ctx context.Context, handlerName string
 
 // ListCachedTokens implements AuthHandlerPlugin.ListCachedTokens.
 func (c *AuthHandlerGRPCClient) ListCachedTokens(ctx context.Context, handlerName string) ([]*auth.CachedTokenInfo, error) {
-	resp, err := c.client.ListCachedTokens(ctx, &proto.ListCachedTokensRequest{HandlerName: handlerName})
+	resp, err := c.client.ListCachedTokens(ctx, &proto.ListCachedTokensRequest{HandlerName: handlerName, Profile: auth.ProfileFromContext(ctx)})
 	if err != nil {
 		return nil, err
 	}
@@ -388,7 +432,7 @@ func (c *AuthHandlerGRPCClient) ListCachedTokens(ctx context.Context, handlerNam
 
 // PurgeExpiredTokens implements AuthHandlerPlugin.PurgeExpiredTokens.
 func (c *AuthHandlerGRPCClient) PurgeExpiredTokens(ctx context.Context, handlerName string) (int, error) {
-	resp, err := c.client.PurgeExpiredTokens(ctx, &proto.PurgeExpiredTokensRequest{HandlerName: handlerName})
+	resp, err := c.client.PurgeExpiredTokens(ctx, &proto.PurgeExpiredTokensRequest{HandlerName: handlerName, Profile: auth.ProfileFromContext(ctx)})
 	if err != nil {
 		return 0, err
 	}
@@ -407,6 +451,7 @@ func (c *AuthHandlerGRPCClient) ConfigureAuthHandler(ctx context.Context, handle
 		Quiet:           cfg.Quiet,
 		NoColor:         cfg.NoColor,
 		BinaryName:      cfg.BinaryName,
+		Profile:         cfg.Profile,
 		HostServiceId:   c.hostServiceID,
 		Settings:        protoSettings,
 		ProtocolVersion: PluginProtocolVersion,
@@ -523,6 +568,7 @@ func statusToProto(s *auth.Status) *proto.GetStatusResponse {
 		ClientId:        s.ClientID,
 		TokenFile:       s.TokenFile,
 		Scopes:          s.Scopes,
+		Flow:            string(s.Flow),
 	}
 }
 
@@ -540,6 +586,7 @@ func protoToStatus(resp *proto.GetStatusResponse) *auth.Status {
 		ClientID:      resp.ClientId,
 		TokenFile:     resp.TokenFile,
 		Scopes:        resp.Scopes,
+		Flow:          auth.Flow(resp.Flow),
 	}
 }
 
@@ -577,32 +624,42 @@ func cachedTokenInfoToProto(t *auth.CachedTokenInfo) *proto.CachedTokenInfo {
 	if t == nil {
 		return &proto.CachedTokenInfo{}
 	}
-	return &proto.CachedTokenInfo{
-		Handler:       t.Handler,
-		TokenKind:     t.TokenKind,
-		Scope:         t.Scope,
-		TokenType:     t.TokenType,
-		Flow:          string(t.Flow),
-		ExpiresAtUnix: t.ExpiresAt.Unix(),
-		CachedAtUnix:  t.CachedAt.Unix(),
-		IsExpired:     t.IsExpired,
-		SessionId:     t.SessionID,
+	p := &proto.CachedTokenInfo{
+		Handler:   t.Handler,
+		TokenKind: t.TokenKind,
+		Scope:     t.Scope,
+		TokenType: t.TokenType,
+		Flow:      string(t.Flow),
+		IsExpired: t.IsExpired,
+		SessionId: t.SessionID,
 	}
+	if !t.ExpiresAt.IsZero() {
+		p.ExpiresAtUnix = t.ExpiresAt.Unix()
+	}
+	if !t.CachedAt.IsZero() {
+		p.CachedAtUnix = t.CachedAt.Unix()
+	}
+	return p
 }
 
 func protoToCachedTokenInfo(t *proto.CachedTokenInfo) *auth.CachedTokenInfo {
 	if t == nil {
 		return &auth.CachedTokenInfo{}
 	}
-	return &auth.CachedTokenInfo{
+	info := &auth.CachedTokenInfo{
 		Handler:   t.Handler,
 		TokenKind: t.TokenKind,
 		Scope:     t.Scope,
 		TokenType: t.TokenType,
 		Flow:      auth.Flow(t.Flow),
-		ExpiresAt: time.Unix(t.ExpiresAtUnix, 0),
-		CachedAt:  time.Unix(t.CachedAtUnix, 0),
 		IsExpired: t.IsExpired,
 		SessionID: t.SessionId,
 	}
+	if t.ExpiresAtUnix != 0 {
+		info.ExpiresAt = time.Unix(t.ExpiresAtUnix, 0)
+	}
+	if t.CachedAtUnix != 0 {
+		info.CachedAt = time.Unix(t.CachedAtUnix, 0)
+	}
+	return info
 }

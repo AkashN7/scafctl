@@ -447,6 +447,53 @@ type EntraAuthConfig struct {
 	// Embedders can override this via WithBaseConfig to change the default
 	// for their CLI.
 	DefaultFlow string `json:"defaultFlow,omitempty" yaml:"defaultFlow,omitempty" mapstructure:"defaultFlow" doc:"Default interactive auth flow" enum:"interactive,device_code" maxLength:"32" example:"interactive"`
+
+	// FederatedTokenFile is the path to the projected service account token file
+	// for workload identity federation. Provides a config-based alternative to
+	// the AZURE_FEDERATED_TOKEN_FILE environment variable.
+	FederatedTokenFile string `json:"federatedTokenFile,omitempty" yaml:"federatedTokenFile,omitempty" mapstructure:"federatedTokenFile" doc:"Path to workload identity federation token file" maxLength:"1024"` //nolint:gosec // G101: config field, not a credential
+
+	// FederatedToken is a raw federated token for workload identity federation.
+	// Primarily for testing. Provides a config-based alternative to the
+	// AZURE_FEDERATED_TOKEN environment variable.
+	FederatedToken string `json:"federatedToken,omitempty" yaml:"federatedToken,omitempty" mapstructure:"federatedToken" doc:"Raw federated token for workload identity (testing)" maxLength:"8192"` //nolint:gosec // G101: config field, not a credential
+
+	// ClientSecret is the client secret for service principal authentication.
+	// Provides a config-based alternative to the AZURE_CLIENT_SECRET environment variable.
+	ClientSecret string `json:"clientSecret,omitempty" yaml:"clientSecret,omitempty" mapstructure:"clientSecret" doc:"Client secret for service principal auth" maxLength:"128"` //nolint:gosec // G101: config field, not a credential
+
+	// ActiveProfile is the default profile for this handler.
+	// When set, this profile's credentials are used unless overridden.
+	ActiveProfile string `json:"activeProfile,omitempty" yaml:"activeProfile,omitempty" mapstructure:"activeProfile" doc:"Default auth profile" maxLength:"64"`
+
+	// Profiles maps profile names to per-profile config overrides.
+	// Profile configs inherit from the top-level handler config and override specific fields.
+	Profiles map[string]*EntraProfileConfig `json:"profiles,omitempty" yaml:"profiles,omitempty" mapstructure:"profiles" doc:"Named auth profiles"`
+}
+
+// EntraProfileConfig is a non-recursive profile entry for Entra auth.
+// It contains the same fields as EntraAuthConfig minus ActiveProfile and Profiles.
+type EntraProfileConfig struct {
+	HTTPClient    *HTTPClientConfig `json:"httpClient,omitempty" yaml:"httpClient,omitempty" mapstructure:"httpClient" doc:"HTTP client overrides for Entra"`
+	ClientID      string            `json:"clientId,omitempty" yaml:"clientId,omitempty" mapstructure:"clientId" doc:"Azure application ID" maxLength:"36"`
+	TenantID      string            `json:"tenantId,omitempty" yaml:"tenantId,omitempty" mapstructure:"tenantId" doc:"Default Azure tenant ID" maxLength:"36"`
+	Authority     string            `json:"authority,omitempty" yaml:"authority,omitempty" mapstructure:"authority" doc:"Azure AD authority URL" maxLength:"256"`
+	DefaultScopes []string          `json:"defaultScopes,omitempty" yaml:"defaultScopes,omitempty" mapstructure:"defaultScopes" doc:"Default OAuth scopes" maxItems:"20"`
+	DefaultFlow   string            `json:"defaultFlow,omitempty" yaml:"defaultFlow,omitempty" mapstructure:"defaultFlow" doc:"Default interactive auth flow" enum:"interactive,device_code" maxLength:"32"`
+
+	// FederatedTokenFile is the path to the projected service account token file
+	// for workload identity federation. When set in a profile, overrides the
+	// AZURE_FEDERATED_TOKEN_FILE environment variable.
+	FederatedTokenFile string `json:"federatedTokenFile,omitempty" yaml:"federatedTokenFile,omitempty" mapstructure:"federatedTokenFile" doc:"Path to workload identity federation token file" maxLength:"1024"` //nolint:gosec // G101: config field, not a credential
+
+	// FederatedToken is a raw federated token for workload identity federation.
+	// Primarily for testing. When set in a profile, overrides the AZURE_FEDERATED_TOKEN
+	// environment variable.
+	FederatedToken string `json:"federatedToken,omitempty" yaml:"federatedToken,omitempty" mapstructure:"federatedToken" doc:"Raw federated token for workload identity (testing)" maxLength:"8192"` //nolint:gosec // G101: config field, not a credential
+
+	// ClientSecret is the client secret for service principal authentication.
+	// When set in a profile, overrides the AZURE_CLIENT_SECRET environment variable.
+	ClientSecret string `json:"clientSecret,omitempty" yaml:"clientSecret,omitempty" mapstructure:"clientSecret" doc:"Client secret for service principal auth" maxLength:"128"` //nolint:gosec // G101: config field, not a credential
 }
 
 // GitHubAuthConfig contains GitHub-specific configuration.
@@ -485,6 +532,28 @@ type GitHubAuthConfig struct {
 
 	// PrivateKeySecretName is the name of the secret store entry containing the private key.
 	PrivateKeySecretName string `json:"privateKeySecretName,omitempty" yaml:"privateKeySecretName,omitempty" mapstructure:"privateKeySecretName" doc:"Secret store key for the GitHub App private key" maxLength:"255" example:"github-app-key"`
+
+	// ActiveProfile is the default profile for this handler.
+	// When set, this profile's credentials are used unless overridden.
+	ActiveProfile string `json:"activeProfile,omitempty" yaml:"activeProfile,omitempty" mapstructure:"activeProfile" doc:"Default auth profile" maxLength:"64"`
+
+	// Profiles maps profile names to per-profile config overrides.
+	// Profile configs inherit from the top-level handler config and override specific fields.
+	Profiles map[string]*GitHubProfileConfig `json:"profiles,omitempty" yaml:"profiles,omitempty" mapstructure:"profiles" doc:"Named auth profiles"`
+}
+
+// GitHubProfileConfig is a non-recursive profile entry for GitHub auth.
+type GitHubProfileConfig struct {
+	HTTPClient           *HTTPClientConfig `json:"httpClient,omitempty" yaml:"httpClient,omitempty" mapstructure:"httpClient" doc:"HTTP client overrides for GitHub"`
+	ClientID             string            `json:"clientId,omitempty" yaml:"clientId,omitempty" mapstructure:"clientId" doc:"GitHub OAuth App client ID" maxLength:"40"`
+	ClientSecret         string            `json:"clientSecret,omitempty" yaml:"clientSecret,omitempty" mapstructure:"clientSecret" doc:"GitHub OAuth App client secret" maxLength:"64"` //nolint:gosec
+	Hostname             string            `json:"hostname,omitempty" yaml:"hostname,omitempty" mapstructure:"hostname" doc:"GitHub hostname" maxLength:"253"`
+	DefaultScopes        []string          `json:"defaultScopes,omitempty" yaml:"defaultScopes,omitempty" mapstructure:"defaultScopes" doc:"Default OAuth scopes" maxItems:"20"`
+	AppID                int64             `json:"appId,omitempty" yaml:"appId,omitempty" mapstructure:"appId" doc:"GitHub App ID"`
+	InstallationID       int64             `json:"installationId,omitempty" yaml:"installationId,omitempty" mapstructure:"installationId" doc:"GitHub App installation ID"`
+	PrivateKeyPath       string            `json:"privateKeyPath,omitempty" yaml:"privateKeyPath,omitempty" mapstructure:"privateKeyPath" doc:"File path to PEM-encoded private key" maxLength:"1024"`
+	PrivateKey           string            `json:"privateKey,omitempty" yaml:"privateKey,omitempty" mapstructure:"privateKey" doc:"Inline PEM-encoded private key" maxLength:"8192"` //nolint:gosec
+	PrivateKeySecretName string            `json:"privateKeySecretName,omitempty" yaml:"privateKeySecretName,omitempty" mapstructure:"privateKeySecretName" doc:"Secret store key for the GitHub App private key" maxLength:"255"`
 }
 
 // GCPAuthConfig contains GCP-specific configuration.
@@ -506,6 +575,42 @@ type GCPAuthConfig struct {
 
 	// Project is the default GCP project ID.
 	Project string `json:"project,omitempty" yaml:"project,omitempty" mapstructure:"project" doc:"Default GCP project ID" example:"my-project-123" maxLength:"64"`
+
+	// ServiceAccountKeyFile is the path to a GCP service account key JSON file.
+	// Provides a config-based alternative to the GOOGLE_APPLICATION_CREDENTIALS
+	// environment variable.
+	ServiceAccountKeyFile string `json:"serviceAccountKeyFile,omitempty" yaml:"serviceAccountKeyFile,omitempty" mapstructure:"serviceAccountKeyFile" doc:"Path to GCP service account key JSON file" maxLength:"1024"`
+
+	// ExternalAccountFile is the path to a workload identity federation config file.
+	// Provides a config-based alternative to the GOOGLE_EXTERNAL_ACCOUNT
+	// environment variable.
+	ExternalAccountFile string `json:"externalAccountFile,omitempty" yaml:"externalAccountFile,omitempty" mapstructure:"externalAccountFile" doc:"Path to GCP workload identity federation config file" maxLength:"1024"`
+
+	// ActiveProfile is the default profile for this handler.
+	// When set, this profile's credentials are used unless overridden.
+	ActiveProfile string `json:"activeProfile,omitempty" yaml:"activeProfile,omitempty" mapstructure:"activeProfile" doc:"Default auth profile" maxLength:"64"`
+
+	// Profiles maps profile names to per-profile config overrides.
+	// Profile configs inherit from the top-level handler config and override specific fields.
+	Profiles map[string]*GCPProfileConfig `json:"profiles,omitempty" yaml:"profiles,omitempty" mapstructure:"profiles" doc:"Named auth profiles"`
+}
+
+// GCPProfileConfig is a non-recursive profile entry for GCP auth.
+type GCPProfileConfig struct {
+	HTTPClient                *HTTPClientConfig `json:"httpClient,omitempty" yaml:"httpClient,omitempty" mapstructure:"httpClient" doc:"HTTP client overrides for GCP"`
+	ClientID                  string            `json:"clientId,omitempty" yaml:"clientId,omitempty" mapstructure:"clientId" doc:"OAuth 2.0 client ID" maxLength:"255"`
+	ClientSecret              string            `json:"clientSecret,omitempty" yaml:"clientSecret,omitempty" mapstructure:"clientSecret" doc:"OAuth 2.0 client secret" maxLength:"255"` //nolint:gosec
+	DefaultScopes             []string          `json:"defaultScopes,omitempty" yaml:"defaultScopes,omitempty" mapstructure:"defaultScopes" doc:"Default OAuth scopes" maxItems:"20"`
+	ImpersonateServiceAccount string            `json:"impersonateServiceAccount,omitempty" yaml:"impersonateServiceAccount,omitempty" mapstructure:"impersonateServiceAccount" doc:"Service account email to impersonate" maxLength:"255"`
+	Project                   string            `json:"project,omitempty" yaml:"project,omitempty" mapstructure:"project" doc:"Default GCP project ID" maxLength:"64"`
+
+	// ServiceAccountKeyFile is the path to a GCP service account key JSON file.
+	// When set in a profile, overrides the GOOGLE_APPLICATION_CREDENTIALS environment variable.
+	ServiceAccountKeyFile string `json:"serviceAccountKeyFile,omitempty" yaml:"serviceAccountKeyFile,omitempty" mapstructure:"serviceAccountKeyFile" doc:"Path to GCP service account key JSON file" maxLength:"1024"`
+
+	// ExternalAccountFile is the path to a workload identity federation config file.
+	// When set in a profile, overrides the GOOGLE_EXTERNAL_ACCOUNT environment variable.
+	ExternalAccountFile string `json:"externalAccountFile,omitempty" yaml:"externalAccountFile,omitempty" mapstructure:"externalAccountFile" doc:"Path to GCP workload identity federation config file" maxLength:"1024"`
 }
 
 // BuildConfig holds build command configuration.
@@ -550,6 +655,11 @@ type PluginsConfig struct {
 	// auto-fetch failure. Prevents repeated timeout penalties during network
 	// outages. Use Go duration syntax (e.g., "5m", "30s"). Default: 5m.
 	FetchCooldown string `json:"fetchCooldown,omitempty" yaml:"fetchCooldown,omitempty" mapstructure:"fetchCooldown" doc:"Cooldown between failed auto-fetch retries" maxLength:"20" example:"5m"`
+
+	// GRPCMaxMessageSize is the maximum gRPC message size in bytes for plugin
+	// communication. Applies to both send and receive directions. Default: 64MB.
+	// Increase this if plugin providers handle very large inputs or outputs.
+	GRPCMaxMessageSize int `json:"grpcMaxMessageSize,omitempty" yaml:"grpcMaxMessageSize,omitempty" mapstructure:"grpcMaxMessageSize" doc:"Maximum gRPC message size in bytes for plugin communication" minimum:"1048576" example:"67108864"`
 }
 
 // PluginSignaturesConfig holds Sigstore/cosign verification settings for plugins.
@@ -578,24 +688,26 @@ type DiscoveryConfig struct {
 
 // APIServerConfig holds REST API server configuration.
 type APIServerConfig struct {
-	Host            string               `json:"host,omitempty" yaml:"host,omitempty" mapstructure:"host" doc:"Host to bind to (defaults to 127.0.0.1; use 0.0.0.0 to expose publicly)" example:"127.0.0.1" maxLength:"253"`
-	Port            int                  `json:"port,omitempty" yaml:"port,omitempty" mapstructure:"port" doc:"Port to listen on" example:"8080" minimum:"1" maximum:"65535"`
-	APIVersion      string               `json:"apiVersion,omitempty" yaml:"apiVersion,omitempty" mapstructure:"apiVersion" doc:"API version prefix (e.g. v1, v2)" example:"v1" maxLength:"10" pattern:"^v[0-9]+$" patternDescription:"must be 'v' followed by one or more digits (e.g. v1, v2)"`
-	ShutdownTimeout string               `json:"shutdownTimeout,omitempty" yaml:"shutdownTimeout,omitempty" mapstructure:"shutdownTimeout" doc:"Graceful shutdown timeout" example:"30s" maxLength:"20"`
-	RequestTimeout  string               `json:"requestTimeout,omitempty" yaml:"requestTimeout,omitempty" mapstructure:"requestTimeout" doc:"Default request timeout" example:"60s" maxLength:"20"`
-	BodyReadTimeout string               `json:"bodyReadTimeout,omitempty" yaml:"bodyReadTimeout,omitempty" mapstructure:"bodyReadTimeout" doc:"Default body read timeout for Huma operations" example:"15s" maxLength:"20"`
-	MaxRequestSize  int64                `json:"maxRequestSize,omitempty" yaml:"maxRequestSize,omitempty" mapstructure:"maxRequestSize" doc:"Maximum request body size in bytes" maximum:"1073741824" example:"10485760"`
-	TLS             APITLSConfig         `json:"tls,omitempty" yaml:"tls,omitempty" mapstructure:"tls" doc:"TLS configuration"`
-	CORS            APICORSConfig        `json:"cors,omitempty" yaml:"cors,omitempty" mapstructure:"cors" doc:"CORS configuration"`
-	RateLimit       APIRateLimitConfig   `json:"rateLimit,omitempty" yaml:"rateLimit,omitempty" mapstructure:"rateLimit" doc:"Rate limiting configuration"`
-	Auth            APIAuthConfig        `json:"auth,omitempty" yaml:"auth,omitempty" mapstructure:"auth" doc:"Authentication configuration"`
-	Compression     APICompressionConfig `json:"compression,omitempty" yaml:"compression,omitempty" mapstructure:"compression" doc:"Response compression configuration"`
-	OpenAPI         APIOpenAPIConfig     `json:"openAPI,omitempty" yaml:"openAPI,omitempty" mapstructure:"openAPI" doc:"OpenAPI specification configuration (Servers field is wired; Title, Description, and other fields are reserved for future use)"`
-	Profiler        APIProfilerConfig    `json:"profiler,omitempty" yaml:"profiler,omitempty" mapstructure:"profiler" doc:"Profiler configuration (reserved for future use — not yet wired into server setup)"`
-	Audit           APIAuditConfig       `json:"audit,omitempty" yaml:"audit,omitempty" mapstructure:"audit" doc:"Audit logging configuration"`
-	Tracing         APITracingConfig     `json:"tracing,omitempty" yaml:"tracing,omitempty" mapstructure:"tracing" doc:"OpenTelemetry tracing configuration"`
-	MaxConcurrent   int                  `json:"maxConcurrent,omitempty" yaml:"maxConcurrent,omitempty" mapstructure:"maxConcurrent" doc:"Maximum concurrent in-flight requests (chi Throttle, not TCP connections)" maximum:"100000" example:"1000"`
-	Plugins         APIPluginConfig      `json:"plugins,omitempty" yaml:"plugins,omitempty" mapstructure:"plugins" doc:"Plugin security configuration"`
+	Host             string                  `json:"host,omitempty" yaml:"host,omitempty" mapstructure:"host" doc:"Host to bind to (defaults to 127.0.0.1; use 0.0.0.0 to expose publicly)" example:"127.0.0.1" maxLength:"253"`
+	Port             int                     `json:"port,omitempty" yaml:"port,omitempty" mapstructure:"port" doc:"Port to listen on" example:"8080" minimum:"1" maximum:"65535"`
+	APIVersion       string                  `json:"apiVersion,omitempty" yaml:"apiVersion,omitempty" mapstructure:"apiVersion" doc:"API version prefix (e.g. v1, v2)" example:"v1" maxLength:"10" pattern:"^v[0-9]+$" patternDescription:"must be 'v' followed by one or more digits (e.g. v1, v2)"`
+	ShutdownTimeout  string                  `json:"shutdownTimeout,omitempty" yaml:"shutdownTimeout,omitempty" mapstructure:"shutdownTimeout" doc:"Graceful shutdown timeout" example:"30s" maxLength:"20"`
+	RequestTimeout   string                  `json:"requestTimeout,omitempty" yaml:"requestTimeout,omitempty" mapstructure:"requestTimeout" doc:"Default request timeout" example:"60s" maxLength:"20"`
+	BodyReadTimeout  string                  `json:"bodyReadTimeout,omitempty" yaml:"bodyReadTimeout,omitempty" mapstructure:"bodyReadTimeout" doc:"Default body read timeout for Huma operations" example:"15s" maxLength:"20"`
+	MaxRequestSize   int64                   `json:"maxRequestSize,omitempty" yaml:"maxRequestSize,omitempty" mapstructure:"maxRequestSize" doc:"Maximum request body size in bytes" maximum:"1073741824" example:"10485760"`
+	TLS              APITLSConfig            `json:"tls,omitempty" yaml:"tls,omitempty" mapstructure:"tls" doc:"TLS configuration"`
+	CORS             APICORSConfig           `json:"cors,omitempty" yaml:"cors,omitempty" mapstructure:"cors" doc:"CORS configuration"`
+	RateLimit        APIRateLimitConfig      `json:"rateLimit,omitempty" yaml:"rateLimit,omitempty" mapstructure:"rateLimit" doc:"Rate limiting configuration"`
+	Auth             APIAuthConfig           `json:"auth,omitempty" yaml:"auth,omitempty" mapstructure:"auth" doc:"Authentication configuration"`
+	Identity         APIIdentityConfig       `json:"identity,omitempty" yaml:"identity,omitempty" mapstructure:"identity" doc:"Server identity for token delegation"`
+	Compression      APICompressionConfig    `json:"compression,omitempty" yaml:"compression,omitempty" mapstructure:"compression" doc:"Response compression configuration"`
+	OpenAPI          APIOpenAPIConfig        `json:"openAPI,omitempty" yaml:"openAPI,omitempty" mapstructure:"openAPI" doc:"OpenAPI specification configuration (Servers field is wired; Title, Description, and other fields are reserved for future use)"`
+	Profiler         APIProfilerConfig       `json:"profiler,omitempty" yaml:"profiler,omitempty" mapstructure:"profiler" doc:"Profiler configuration (reserved for future use — not yet wired into server setup)"`
+	Audit            APIAuditConfig          `json:"audit,omitempty" yaml:"audit,omitempty" mapstructure:"audit" doc:"Audit logging configuration"`
+	Tracing          APITracingConfig        `json:"tracing,omitempty" yaml:"tracing,omitempty" mapstructure:"tracing" doc:"OpenTelemetry tracing configuration"`
+	MaxConcurrent    int                     `json:"maxConcurrent,omitempty" yaml:"maxConcurrent,omitempty" mapstructure:"maxConcurrent" doc:"Maximum concurrent in-flight requests (chi Throttle, not TCP connections)" maximum:"100000" example:"1000"`
+	Plugins          APIPluginConfig         `json:"plugins,omitempty" yaml:"plugins,omitempty" mapstructure:"plugins" doc:"Plugin security configuration"`
+	TokenPassThrough *TokenPassThroughConfig `json:"tokenPassThrough,omitempty" yaml:"tokenPassThrough,omitempty" mapstructure:"tokenPassThrough" doc:"Token pass-through configuration for delegating tokens to plugin providers"`
 }
 
 // APIPluginConfig holds security settings for plugin execution in the API server.
@@ -654,6 +766,66 @@ type APIAzureOIDCConfig struct {
 	TenantID string `json:"tenantId,omitempty" yaml:"tenantId,omitempty" mapstructure:"tenantId" doc:"Azure AD tenant ID" maxLength:"36" example:"00000000-0000-0000-0000-000000000000"`
 	ClientID string `json:"clientId,omitempty" yaml:"clientId,omitempty" mapstructure:"clientId" doc:"Azure AD client ID" maxLength:"36" example:"00000000-0000-0000-0000-000000000000"`
 }
+
+// APIIdentityConfig holds server identity configuration for token delegation.
+type APIIdentityConfig struct {
+	Entra *APIEntraIdentityConfig `json:"entra,omitempty" yaml:"entra,omitempty" mapstructure:"entra" doc:"Azure Entra ID identity for token delegation"`
+}
+
+// APIEntraIdentityConfig holds Azure Entra ID credential configuration for OBO and client_credentials delegation.
+type APIEntraIdentityConfig struct {
+	TenantID     string                 `json:"tenantId" yaml:"tenantId" mapstructure:"tenantId" doc:"Azure AD tenant ID" maxLength:"36" example:"00000000-0000-0000-0000-000000000000"`
+	ClientID     string                 `json:"clientId" yaml:"clientId" mapstructure:"clientId" doc:"Azure AD client ID" maxLength:"36" example:"00000000-0000-0000-0000-000000000000"`
+	Credential   ServerCredentialConfig `json:"credential" yaml:"credential" mapstructure:"credential" doc:"Server credential configuration"`
+	TokenManager *TokenManagerConfig    `json:"tokenManager,omitempty" yaml:"tokenManager,omitempty" mapstructure:"tokenManager" doc:"Token manager configuration (nil = no caching/deduplication)"`
+	AllowedFlows *DelegationFlowsConfig `json:"allowedFlows,omitempty" yaml:"allowedFlows,omitempty" mapstructure:"allowedFlows" doc:"Permitted delegation flows (nil = OBO only, present with empty flows = deny all)"`
+}
+
+// TokenManagerConfig holds configuration for the token delegation cache manager.
+// A nil pointer on the parent disables caching entirely.
+// A non-nil struct with zero values uses sensible defaults defined in pkg/authdelegation.
+type TokenManagerConfig struct {
+	// CacheSize is the maximum number of cached tokens. Zero uses the package default.
+	CacheSize int `json:"cacheSize,omitempty" yaml:"cacheSize,omitempty" mapstructure:"cacheSize" doc:"LRU cache size (0 = package default)" maximum:"100000"`
+
+	// ExpiryBuffer is the safety margin subtracted from token TTL before caching.
+	// Prevents serving tokens that are about to expire. Use Go duration syntax.
+	ExpiryBuffer string `json:"expiryBuffer,omitempty" yaml:"expiryBuffer,omitempty" mapstructure:"expiryBuffer" doc:"Safety margin before token expiry" maxLength:"20"`
+
+	// CleanupInterval is how often the background goroutine evicts expired entries.
+	// Use Go duration syntax.
+	CleanupInterval string `json:"cleanupInterval,omitempty" yaml:"cleanupInterval,omitempty" mapstructure:"cleanupInterval" doc:"Background eviction interval" maxLength:"20"`
+
+	// ExpiryThreshold is the minimum remaining TTL a token must have to be cached.
+	// Tokens with TTL <= this value are treated as uncacheable. Use Go duration syntax.
+	ExpiryThreshold string `json:"expiryThreshold,omitempty" yaml:"expiryThreshold,omitempty" mapstructure:"expiryThreshold" doc:"Minimum TTL to cache a token" maxLength:"20"`
+
+	// SlowThreshold is how long a follower waits for the leader before retrying independently.
+	// Use Go duration syntax.
+	SlowThreshold string `json:"slowThreshold,omitempty" yaml:"slowThreshold,omitempty" mapstructure:"slowThreshold" doc:"Follower bail-out duration" maxLength:"20"`
+
+	// RetryFollowerOnError controls whether followers retry independently when the leader errors.
+	RetryFollowerOnError *bool `json:"retryFollowerOnError,omitempty" yaml:"retryFollowerOnError,omitempty" mapstructure:"retryFollowerOnError" doc:"Followers retry on leader error"`
+}
+
+// ServerCredentialConfig holds the server's authentication credential for token delegation.
+type ServerCredentialConfig struct {
+	Type         string    `json:"type" yaml:"type" mapstructure:"type" doc:"Server credential type" enum:"wif,secret" example:"secret" maxLength:"10"`
+	ClientSecret SecretRef `json:"clientSecret,omitempty" yaml:"clientSecret,omitempty" mapstructure:"clientSecret" doc:"Secret reference URI (env://VAR_NAME or file:///path)" maxLength:"512" example:"env://SCAFCTL_API_ENTRA_CLIENT_SECRET"`
+	WIFTokenPath string    `json:"wifTokenPath,omitempty" yaml:"wifTokenPath,omitempty" mapstructure:"wifTokenPath" doc:"Path to federated token file (required when type is wif)" maxLength:"512" example:"/var/run/secrets/azure/tokens/federated-token"`
+}
+
+// DelegationFlowsConfig controls which delegation flows the server may use.
+// A nil pointer on the parent means "use defaults (OBO only)".
+// A non-nil struct with empty Flows means "deny all delegation".
+// A non-nil struct with populated Flows means "only permit listed flows".
+type DelegationFlowsConfig struct {
+	Flows []string `json:"flows,omitempty" yaml:"flows,omitempty" mapstructure:"flows" doc:"Permitted delegation flows (obo, client_credentials)" maxItems:"10"`
+}
+
+// SecretRef is a URI-style reference to a secret value.
+// Supported schemes: env:// (environment variable), file:// (file path).
+type SecretRef string
 
 // APICompressionConfig holds response compression configuration.
 type APICompressionConfig struct {
@@ -759,4 +931,8 @@ type IdentityFieldMapping struct {
 	Username string `json:"username,omitempty" yaml:"username,omitempty" mapstructure:"username" doc:"JSON field for username" maxLength:"128" example:"username"`
 	Email    string `json:"email,omitempty" yaml:"email,omitempty" mapstructure:"email" doc:"JSON field for email" maxLength:"128" example:"email"`
 	Name     string `json:"name,omitempty" yaml:"name,omitempty" mapstructure:"name" doc:"JSON field for display name" maxLength:"128"`
+}
+
+type TokenPassThroughConfig struct {
+	AllowedHeaders []string `json:"allowedHeaders,omitempty" yaml:"allowedHeaders,omitempty" mapstructure:"allowedHeaders" doc:"Allowed token header suffixes without the X-Authorization- prefix" maxItems:"50"`
 }

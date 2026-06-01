@@ -86,7 +86,7 @@ func TestCommandBuildSolution_RequiresArgs(t *testing.T) {
 
 	err := cmd.Execute()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no -f/--file specified")
+	assert.Contains(t, err.Error(), "no solution path provided")
 }
 
 func TestCommandBuildSolution_TagConflictsWithName(t *testing.T) {
@@ -687,6 +687,7 @@ func TestRunBuildSolution_DirtyTreeWarns(t *testing.T) {
 	runGit("init", "-b", "main")
 	runGit("config", "user.email", "test@test.com")
 	runGit("config", "user.name", "test")
+	runGit("config", "commit.gpgsign", "false")
 
 	solFile := filepath.Join(dir, "solution.yaml")
 	content := "apiVersion: scafctl.io/v1\nkind: Solution\nmetadata:\n  name: dirty-test\n  version: 1.0.0\nspec: {}\n"
@@ -732,6 +733,7 @@ func TestRunBuildSolution_AllowDirtyProceeds(t *testing.T) {
 	runGit("init", "-b", "main")
 	runGit("config", "user.email", "test@test.com")
 	runGit("config", "user.name", "test")
+	runGit("config", "commit.gpgsign", "false")
 
 	solFile := filepath.Join(dir, "solution.yaml")
 	content := "apiVersion: scafctl.io/v1\nkind: Solution\nmetadata:\n  name: dirty-ok\n  version: 1.0.0\nspec: {}\n"

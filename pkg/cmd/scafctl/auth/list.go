@@ -30,6 +30,7 @@ func CommandList(cliParams *settings.Run, ioStreams *terminal.IOStreams, _ strin
 		expiredOnly  bool
 		validOnly    bool
 		purgeExpired bool
+		profile      string
 	)
 
 	var sortBy string
@@ -47,6 +48,12 @@ func CommandList(cliParams *settings.Run, ioStreams *terminal.IOStreams, _ strin
 			cache time, and whether the token is currently expired.  Actual token
 			values are never displayed here — use 'scafctl auth token <handler>'
 			to retrieve a token value.
+
+			Official auth handlers are downloaded automatically on first use via
+			'scafctl auth login <handler>'. To discover additional auth handlers
+			from a catalog, run:
+
+			  scafctl catalog list --kind auth-handler
 
 			Examples:
 			  # Show tokens for all handlers
@@ -83,6 +90,12 @@ func CommandList(cliParams *settings.Run, ioStreams *terminal.IOStreams, _ strin
 		Aliases:      []string{"ls"},
 		SilenceUsage: true,
 		Args:         cobra.MaximumNArgs(1),
+		ValidArgsFunction: func(cmd *cobra.Command, args []string, _ string) ([]string, cobra.ShellCompDirective) {
+			if len(args) > 0 {
+				return nil, cobra.ShellCompDirectiveNoFileComp
+			}
+			return listKnownHandlers(cmd.Context()), cobra.ShellCompDirectiveNoFileComp
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			w := writer.FromContext(ctx)
@@ -90,6 +103,21 @@ func CommandList(cliParams *settings.Run, ioStreams *terminal.IOStreams, _ strin
 				return fmt.Errorf("writer not initialized in context")
 			}
 			outputFlags.AppName = cliParams.BinaryName
+
+			// Resolve effective profile: per-command --profile > global --auth-profile > config activeProfile
+			// Track whether profile was explicitly set (even if normalized to empty/default).
+			profileExplicit := cmd.Flags().Changed("profile")
+			effectiveProfile := auth.NormalizeProfileName(profile)
+			if effectiveProfile == "" && !profileExplicit {
+				effectiveProfile = auth.NormalizeProfileName(auth.GlobalProfileFromContext(ctx))
+			}
+			if effectiveProfile != "" {
+				if err := auth.ValidateProfileName(effectiveProfile); err != nil {
+					w.Errorf("%v", err)
+					return exitcode.WithCode(err, exitcode.InvalidInput)
+				}
+				ctx = auth.WithProfile(ctx, effectiveProfile)
+			}
 
 			if expiredOnly && validOnly {
 				err := fmt.Errorf("--expired-only and --valid-only are mutually exclusive")
@@ -103,13 +131,10 @@ func CommandList(cliParams *settings.Run, ioStreams *terminal.IOStreams, _ strin
 			}
 
 			handlerNames := listHandlers(ctx)
-			if len(handlerNames) == 0 {
-				err := fmt.Errorf("no auth handlers registered")
-				w.Errorf("%v", err)
-				return exitcode.WithCode(err, exitcode.GeneralError)
-			}
 
-			// Filter to a single handler if specified
+			// When a specific handler is provided, allow lazy resolution (user
+			// explicitly asked for it). Otherwise only iterate eagerly-registered
+			// handlers to avoid surprise network I/O.
 			if len(args) > 0 {
 				handlerName := args[0]
 				if err := validateHandlerName(ctx, handlerName); err != nil {
@@ -117,6 +142,38 @@ func CommandList(cliParams *settings.Run, ioStreams *terminal.IOStreams, _ strin
 					return exitcode.WithCode(err, exitcode.InvalidInput)
 				}
 				handlerNames = []string{handlerName}
+
+				// Fall back to config activeProfile when no explicit profile was set
+				if effectiveProfile == "" && !profileExplicit {
+					if configProfile := auth.ResolveActiveProfile(ctx, handlerName); configProfile != "" {
+						ctx = auth.WithProfile(ctx, configProfile)
+					}
+				}
+			} else if len(handlerNames) == 0 {
+				// No eagerly-registered handlers. Check if official ones exist.
+				unconfigured := listUnconfiguredOfficialHandlers(ctx)
+				if len(unconfigured) == 0 {
+					err := fmt.Errorf("no auth handlers registered")
+					w.Errorf("%v", err)
+					return exitcode.WithCode(err, exitcode.GeneralError)
+				}
+				if outputFlags.Output == "json" || outputFlags.Output == "yaml" || outputFlags.Output == "quiet" {
+					opts := flags.NewKvxOutputOptionsFromFlags(
+						outputFlags.Output,
+						outputFlags.Interactive,
+						outputFlags.Expression,
+						kvx.WithOutputContext(ctx),
+						kvx.WithOutputNoColor(cliParams.NoColor),
+						kvx.WithOutputAppName(cliParams.BinaryName+" auth list"),
+					)
+					opts.IOStreams = ioStreams
+					return opts.Write([]map[string]any{})
+				}
+				w.Infof("No active authentication sessions.")
+				w.Infof("")
+				w.Infof("Official auth handlers: %s", strings.Join(unconfigured, ", "))
+				w.Infof("Run '%s auth login <handler>' to authenticate (downloads automatically on first use).", cliParams.BinaryName)
+				return nil
 			}
 
 			// --purge-expired: remove expired access tokens and return a summary.
@@ -125,17 +182,24 @@ func CommandList(cliParams *settings.Run, ioStreams *terminal.IOStreams, _ strin
 				for _, name := range handlerNames {
 					handler, err := getHandler(ctx, name)
 					if err != nil {
-						w.Warningf("Failed to initialize %s: %v", name, err)
+						w.WarnStderrf("Failed to initialize %s: %v", name, err)
 						continue
 					}
 					purger, ok := handler.(auth.TokenPurger)
 					if !ok {
-						w.Warningf("%s does not support token purging", name)
+						w.WarnStderrf("%s does not support token purging", name)
 						continue
 					}
-					n, err := purger.PurgeExpiredTokens(ctx)
+					// Apply per-handler activeProfile when iterating all handlers
+					handlerCtx := ctx
+					if effectiveProfile == "" && !profileExplicit && len(args) == 0 {
+						if configProfile := auth.ResolveActiveProfile(ctx, name); configProfile != "" {
+							handlerCtx = auth.WithProfile(ctx, configProfile)
+						}
+					}
+					n, err := purger.PurgeExpiredTokens(handlerCtx)
 					if err != nil {
-						w.Warningf("Failed to purge expired tokens for %s: %v", name, err)
+						w.WarnStderrf("Failed to purge expired tokens for %s: %v", name, err)
 						continue
 					}
 					if n > 0 {
@@ -157,22 +221,41 @@ func CommandList(cliParams *settings.Run, ioStreams *terminal.IOStreams, _ strin
 
 			results := make([]map[string]any, 0)
 
+			outputOpts := flags.NewKvxOutputOptionsFromFlags(
+				outputFlags.Output,
+				outputFlags.Interactive,
+				outputFlags.Expression,
+				kvx.WithOutputContext(ctx),
+				kvx.WithOutputNoColor(cliParams.NoColor),
+				kvx.WithOutputAppName(cliParams.BinaryName+" auth list"),
+			)
+			outputOpts.IOStreams = ioStreams
+
 			for _, name := range handlerNames {
 				handler, err := getHandler(ctx, name)
 				if err != nil {
-					w.Warningf("Failed to initialize %s: %v", name, err)
+					w.WarnStderrf("Failed to initialize %s: %v", name, err)
 					continue
 				}
 
 				lister, ok := handler.(auth.TokenLister)
 				if !ok {
-					w.Warningf("%s does not support token listing", name)
+					w.WarnStderrf("%s does not support token listing", name)
 					continue
 				}
 
-				tokens, err := lister.ListCachedTokens(ctx)
+				// Apply per-handler activeProfile when iterating all handlers
+				// (no explicit --profile was set and no single handler arg).
+				handlerCtx := ctx
+				if effectiveProfile == "" && !profileExplicit && len(args) == 0 {
+					if configProfile := auth.ResolveActiveProfile(ctx, name); configProfile != "" {
+						handlerCtx = auth.WithProfile(ctx, configProfile)
+					}
+				}
+
+				tokens, err := lister.ListCachedTokens(handlerCtx)
 				if err != nil {
-					w.Warningf("Failed to list tokens for %s: %v", name, err)
+					w.WarnStderrf("Failed to list tokens for %s: %v", name, err)
 					continue
 				}
 
@@ -182,7 +265,15 @@ func CommandList(cliParams *settings.Run, ioStreams *terminal.IOStreams, _ strin
 			}
 
 			if len(results) == 0 {
+				if outputFlags.Output == "json" || outputFlags.Output == "yaml" || outputFlags.Output == "quiet" {
+					return outputOpts.Write(results)
+				}
 				w.Infof("No cached tokens found.")
+				if unconfigured := listUnconfiguredOfficialHandlers(ctx); len(unconfigured) > 0 {
+					w.Infof("")
+					w.Infof("Hint: additional official auth handlers: %s", strings.Join(unconfigured, ", "))
+					w.Infof("      Run '%s auth login <handler>' to authenticate.", cliParams.BinaryName)
+				}
 				return nil
 			}
 
@@ -201,6 +292,9 @@ func CommandList(cliParams *settings.Run, ioStreams *terminal.IOStreams, _ strin
 			}
 
 			if len(results) == 0 {
+				if outputFlags.Output == "json" || outputFlags.Output == "yaml" || outputFlags.Output == "quiet" {
+					return outputOpts.Write(results)
+				}
 				w.Infof("No cached tokens matched the filter.")
 				return nil
 			}
@@ -213,16 +307,6 @@ func CommandList(cliParams *settings.Run, ioStreams *terminal.IOStreams, _ strin
 				}
 			}
 
-			outputOpts := flags.NewKvxOutputOptionsFromFlags(
-				outputFlags.Output,
-				outputFlags.Interactive,
-				outputFlags.Expression,
-				kvx.WithOutputContext(ctx),
-				kvx.WithOutputNoColor(cliParams.NoColor),
-				kvx.WithOutputAppName(cliParams.BinaryName+" auth list"),
-			)
-			outputOpts.IOStreams = ioStreams
-
 			return outputOpts.Write(results)
 		},
 	}
@@ -232,6 +316,7 @@ func CommandList(cliParams *settings.Run, ioStreams *terminal.IOStreams, _ strin
 	cmd.Flags().BoolVar(&validOnly, "valid-only", false, "Show only valid (non-expired) tokens")
 	cmd.Flags().StringVar(&sortBy, "sort", "", "Sort results by field: handler, kind, scope, expires-at, cached-at")
 	cmd.Flags().BoolVar(&purgeExpired, "purge-expired", false, "Remove expired access tokens from the cache (the refresh token and valid tokens are preserved)")
+	cmd.Flags().StringVar(&profile, "profile", "", "Named profile for isolated credential storage (e.g. work, personal)")
 	return cmd
 }
 

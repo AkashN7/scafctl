@@ -166,6 +166,11 @@ func runServe(ctx context.Context, opts *Options) error {
 	// lifecycle (shutdown) is managed consistently.
 	pluginPool := buildPluginPool(ctx, cfg, pluginFetcher, reg, lgr, pluginClients)
 
+	// // Build delegation registry for API-mode token delegation.
+	// delegationReg, err := buildDelegationRegistry(ctx, &cfg.APIServer, lgr)
+	// if err != nil {
+	// 	return fmt.Errorf("building delegation registry: %w", err)
+	// }
 	// Build server options
 	serverOpts := []api.ServerOption{
 		api.WithServerLogger(*lgr),
@@ -298,6 +303,10 @@ func buildPluginPool(ctx context.Context, cfg *config.Config, fetcher *plugin.Fe
 	// Wire auth host dependencies so plugins can use host auth
 	if authOpts := plugin.AuthClientOptsFromContext(ctx); len(authOpts) > 0 {
 		poolOpts = append(poolOpts, plugin.WithClientOptions(authOpts...))
+	}
+	// Wire gRPC max message size from config
+	if cfg.Plugins.GRPCMaxMessageSize > 0 {
+		poolOpts = append(poolOpts, plugin.WithClientOptions(plugin.WithGRPCMaxMessageSize(cfg.Plugins.GRPCMaxMessageSize)))
 	}
 	pool := plugin.NewPool(fetcher, reg, *lgr, poolOpts...)
 	for _, c := range preloaded {

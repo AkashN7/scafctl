@@ -308,6 +308,7 @@ func TestAuthHandlerStatusConversion(t *testing.T) {
 		ClientID:     "client-xyz",
 		TokenFile:    "/tmp/token",
 		Scopes:       []string{"read", "write", "admin"},
+		Flow:         auth.FlowServicePrincipal,
 	}
 
 	protoStatus := statusToProto(original)
@@ -322,6 +323,7 @@ func TestAuthHandlerStatusConversion(t *testing.T) {
 	assert.Equal(t, original.ClientID, converted.ClientID)
 	assert.Equal(t, original.TokenFile, converted.TokenFile)
 	assert.Equal(t, original.Scopes, converted.Scopes)
+	assert.Equal(t, original.Flow, converted.Flow)
 }
 
 // TestAuthHandlerTokenConversion tests TokenResponse roundtrip through proto conversion.
@@ -576,6 +578,7 @@ func TestAuthHandlerGRPCServer_ConfigureAuthHandler(t *testing.T) {
 				Quiet:           true,
 				NoColor:         true,
 				BinaryName:      "mycli",
+				Profile:         "work",
 				ProtocolVersion: PluginProtocolVersion,
 				Settings: map[string][]byte{
 					"timeout": []byte(`30`),
@@ -594,6 +597,7 @@ func TestAuthHandlerGRPCServer_ConfigureAuthHandler(t *testing.T) {
 			assert.True(t, mock.lastConfig.Quiet)
 			assert.True(t, mock.lastConfig.NoColor)
 			assert.Equal(t, "mycli", mock.lastConfig.BinaryName)
+			assert.Equal(t, "work", mock.lastConfig.Profile)
 			assert.Contains(t, mock.lastConfig.Settings, "timeout")
 		})
 	}

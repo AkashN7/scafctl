@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/adrg/xdg"
@@ -160,6 +161,22 @@ const (
 	DefaultGoTemplateCacheSize = 10000
 )
 
+// Plugin defaults
+const (
+	// DefaultGRPCMaxMessageSize is the default maximum gRPC message size for
+	// plugin communication (64 MB). The Go gRPC library default is 4 MB, which
+	// is too small for solutions with legitimately large provider inputs or
+	// outputs (e.g., large HCL files, API responses). This applies to both
+	// send and receive directions.
+	DefaultGRPCMaxMessageSize = 64 * 1024 * 1024
+
+	// MinGRPCMaxMessageSize is the minimum accepted gRPC message size (1 MB).
+	// Values below this floor are treated as misconfiguration and the default
+	// is used instead. Matches the minimum:"1048576" validation tag on the
+	// config struct.
+	MinGRPCMaxMessageSize = 1024 * 1024
+)
+
 // API server defaults
 const (
 	// DefaultAPIPort is the default port for the API server.
@@ -220,6 +237,9 @@ const (
 	// CEL or Go-template evaluation request. Prevents CPU exhaustion from
 	// expensive user-supplied expressions.
 	DefaultAPIEvalTimeout = 30 * time.Second
+
+	// DefaultAPIIdentityCacheSize is the default LRU cache size for delegated tokens.
+	DefaultAPIIdentityCacheSize = 1024
 )
 
 // Circuit breaker defaults
@@ -310,6 +330,8 @@ func SolutionFileNamesFor(binaryName string) []string {
 		fmt.Sprintf("%s.yml", binaryName),
 		"solution.json",
 		fmt.Sprintf("%s.json", binaryName),
+		"taskfile.yaml",
+		"taskfile.yml",
 		"actions.yaml",
 		"actions.yml",
 	}
@@ -339,6 +361,8 @@ func SolutionOnlyFileNamesFor(binaryName string) []string {
 		fmt.Sprintf("%s.yml", binaryName),
 		"solution.json",
 		fmt.Sprintf("%s.json", binaryName),
+		"taskfile.yaml",
+		"taskfile.yml",
 	}
 }
 
@@ -368,15 +392,55 @@ func IsActionFile(name string) bool {
 	return name == "actions.yaml" || name == "actions.yml"
 }
 
+// IsTaskFile returns true when the given filename is a task file
+// (taskfile.yaml or taskfile.yml).
+func IsTaskFile(name string) bool {
+	return name == "taskfile.yaml" || name == "taskfile.yml"
+}
+
 // HTTPCacheKeyPrefixFor returns the HTTP cache key prefix for the given binary name.
 func HTTPCacheKeyPrefixFor(binaryName string) string {
 	return binaryName + ":"
 }
 
-var (
-	RootSolutionFolders = SolutionFoldersFor(CliBinaryName)
-	SolutionFileNames   = SolutionFileNamesFor(CliBinaryName)
-)
+// solutionDiscoveryState guards the process-wide solution discovery lists that
+// are written once by Root() and read by solution/get and MCP capabilities.
+var solutionDiscoveryState = newSolutionDiscovery()
+
+type solutionDiscovery struct {
+	mu              sync.RWMutex
+	solutionFolders []string
+	solutionFiles   []string
+}
+
+func newSolutionDiscovery() *solutionDiscovery {
+	return &solutionDiscovery{
+		solutionFolders: SolutionFoldersFor(CliBinaryName),
+		solutionFiles:   SolutionFileNamesFor(CliBinaryName),
+	}
+}
+
+// GetRootSolutionFolders returns the current solution folder search paths.
+func GetRootSolutionFolders() []string {
+	solutionDiscoveryState.mu.RLock()
+	defer solutionDiscoveryState.mu.RUnlock()
+	return solutionDiscoveryState.solutionFolders
+}
+
+// GetSolutionFileNames returns the current solution file names.
+func GetSolutionFileNames() []string {
+	solutionDiscoveryState.mu.RLock()
+	defer solutionDiscoveryState.mu.RUnlock()
+	return solutionDiscoveryState.solutionFiles
+}
+
+// SetSolutionDiscovery atomically updates both solution folder and file name lists.
+func SetSolutionDiscovery(folders, fileNames []string) {
+	solutionDiscoveryState.mu.Lock()
+	defer solutionDiscoveryState.mu.Unlock()
+	solutionDiscoveryState.solutionFolders = folders
+	solutionDiscoveryState.solutionFiles = fileNames
+}
 
 var VersionInformation = VersionInfo{
 	Commit:       "unknown",

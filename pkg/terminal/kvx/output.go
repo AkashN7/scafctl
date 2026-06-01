@@ -307,6 +307,11 @@ type OutputOptions struct {
 	// When set, the TUI renders arrays as a scrollable card list with sectioned
 	// detail views instead of the default KEY/VALUE table.
 	DisplaySchemaJSON []byte `json:"-" yaml:"-" doc:"JSON Schema with x-kvx-* extensions for rich TUI rendering"`
+
+	// ColumnarMode controls when arrays of objects render as multi-column tables.
+	// Valid values: "auto" (default), "always", "never".
+	// Use "always" when the data is intentionally multi-column regardless of key homogeneity.
+	ColumnarMode string `json:"columnarMode,omitempty" yaml:"columnarMode,omitempty" doc:"Columnar rendering mode: auto, always, never" example:"always" maxLength:"10"`
 }
 
 // NewOutputOptions creates a new OutputOptions with default settings.
@@ -408,6 +413,14 @@ func WithOutputSchemaJSON(schema []byte) OutputOption {
 // the schema are merged with any programmatic ColumnHints (programmatic take precedence).
 func WithOutputDisplaySchemaJSON(schema []byte) OutputOption {
 	return func(o *OutputOptions) { o.DisplaySchemaJSON = schema }
+}
+
+// WithOutputColumnarMode controls when arrays of objects render as multi-column tables.
+// Valid values: tui.ColumnarModeAuto ("auto"), tui.ColumnarModeAlways ("always"),
+// tui.ColumnarModeNever ("never"). Use "always" when data is intentionally multi-column
+// regardless of key homogeneity.
+func WithOutputColumnarMode(mode string) OutputOption {
+	return func(o *OutputOptions) { o.ColumnarMode = mode }
 }
 
 // WithIOStreams sets the IOStreams for output.
@@ -552,6 +565,9 @@ func (o *OutputOptions) buildViewerOptions() []Option {
 	if len(o.DisplaySchemaJSON) > 0 {
 		kvxOpts = append(kvxOpts, WithDisplaySchemaJSON(o.DisplaySchemaJSON))
 	}
+	if o.ColumnarMode != "" {
+		kvxOpts = append(kvxOpts, WithColumnarMode(o.ColumnarMode))
+	}
 
 	return kvxOpts
 }
@@ -683,18 +699,26 @@ func (o *OutputOptions) writeText(data any) error {
 	// truncated one-line JSON which is unusable in scripts.
 	if cols := countDataColumns(outputData); cols > 0 {
 		width := o.terminalWidth()
-		if width/(cols+1) < minColumnWidth || (piped && hasNestedValues(outputData)) {
+		if o.ColumnarMode != tui.ColumnarModeAlways && (width/(cols+1) < minColumnWidth || (piped && hasNestedValues(outputData))) {
 			output := tui.RenderList(outputData, true)
 			fmt.Fprint(o.IOStreams.Out, output)
 			return nil
 		}
 	}
 
+	// When ColumnarModeAlways is set, normalize heterogeneous map arrays so
+	// all elements share the same key set. Without this, kvx's homogeneity
+	// check fails and falls back to KEY/VALUE rendering.
+	if o.ColumnarMode == tui.ColumnarModeAlways {
+		outputData = normalizeSliceKeys(outputData)
+	}
+
 	output := tui.RenderTable(outputData, tui.TableOptions{
-		Bordered:    false,
-		NoColor:     true,
-		ColumnOrder: o.ColumnOrder,
-		ColumnHints: hints,
+		Bordered:     false,
+		NoColor:      true,
+		ColumnOrder:  o.ColumnOrder,
+		ColumnHints:  hints,
+		ColumnarMode: o.ColumnarMode,
 	})
 
 	// When piped on Windows the console defaults to OEM/CP437 encoding,
@@ -723,6 +747,48 @@ func normalizeForText(data any) (any, error) {
 	}
 	// Struct or other type: round-trip through JSON.
 	return StructToMap(data)
+}
+
+// normalizeSliceKeys pads all maps in a []any so every map contains the
+// union of all keys present across elements. Missing keys get an empty
+// string default. This makes kvx's IsHomogeneousArray succeed for arrays
+// where elements have slightly different key sets (e.g., auth handler
+// results where only some handlers set "_expiresAtTime").
+func normalizeSliceKeys(data any) any {
+	arr, ok := data.([]any)
+	if !ok || len(arr) < 2 {
+		return data
+	}
+
+	// Collect the union of all keys across elements.
+	allKeys := make(map[string]struct{})
+	maps := make([]map[string]any, 0, len(arr))
+	for _, elem := range arr {
+		m, mOk := elem.(map[string]any)
+		if !mOk {
+			return data // mixed types, nothing to normalize
+		}
+		maps = append(maps, m)
+		for k := range m {
+			allKeys[k] = struct{}{}
+		}
+	}
+
+	// Build new slice with copies; pad missing keys with empty string.
+	result := make([]any, len(maps))
+	for i, m := range maps {
+		cp := make(map[string]any, len(allKeys))
+		for k := range allKeys {
+			if v, exists := m[k]; exists {
+				cp[k] = v
+			} else {
+				cp[k] = ""
+			}
+		}
+		result[i] = cp
+	}
+
+	return result
 }
 
 // writeSummaryLine prints scalar fields from a map as a single "key=value ..." line.

@@ -2143,15 +2143,23 @@ func TestIntegration_AuthLoginGitHubInvalidFlow(t *testing.T) {
 
 func TestIntegration_AuthLoginGitHubAppFlow(t *testing.T) {
 	t.Parallel()
-	// github-app flow without required config should fail.
-	_, stderr, exitCode := runScafctl(t, "auth", "login", "github", "--flow", "github-app")
+	// github-app flow without required config should fail, unless already authenticated.
+	stdout, stderr, exitCode := runScafctl(t, "auth", "login", "github", "--flow", "github-app")
 
-	assert.NotEqual(t, 0, exitCode)
-	// Either config error (plugin installed) or handler not found (plugin not installed)
-	assert.True(t,
-		strings.Contains(stderr, "app ID is required") || strings.Contains(stderr, "unknown auth handler"),
-		"expected config or handler error, got: %s", stderr,
-	)
+	combined := stdout + stderr
+	if exitCode == 0 {
+		// Already authenticated — handler short-circuits with a warning.
+		assert.True(t,
+			strings.Contains(combined, "Already authenticated") || strings.Contains(combined, "already authenticated"),
+			"expected already-authenticated warning on success, got stdout=%s stderr=%s", stdout, stderr,
+		)
+	} else {
+		// Either config error (plugin installed) or handler not found (plugin not installed)
+		assert.True(t,
+			strings.Contains(stderr, "app ID is required") || strings.Contains(stderr, "unknown auth handler"),
+			"expected config or handler error, got: %s", stderr,
+		)
+	}
 }
 
 func TestIntegration_AuthStatusEntra(t *testing.T) {
@@ -2183,6 +2191,117 @@ func TestIntegration_AuthLogoutEntra(t *testing.T) {
 			"expected handler/plugin error, got: %s", stderr,
 		)
 	}
+}
+
+func TestIntegration_AuthHandlersInstallHelp(t *testing.T) {
+	t.Parallel()
+	stdout, _, exitCode := runScafctl(t, "auth", "handlers", "install", "--help")
+
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, stdout, "Download an official auth handler plugin")
+}
+
+func TestIntegration_AuthHandlersRemoveHelp(t *testing.T) {
+	t.Parallel()
+	stdout, _, exitCode := runScafctl(t, "auth", "handlers", "remove", "--help")
+
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, stdout, "Remove a cached auth handler plugin")
+}
+
+func TestIntegration_AuthHandlersInstallUnknown(t *testing.T) {
+	t.Parallel()
+	_, stderr, exitCode := runScafctl(t, "auth", "handlers", "install", "nonexistent-handler-xyz")
+
+	assert.NotEqual(t, 0, exitCode)
+	assert.Contains(t, stderr, "unknown auth handler")
+}
+
+func TestIntegration_AuthHandlersRemoveNotInstalled(t *testing.T) {
+	t.Parallel()
+	_, stderr, exitCode := runScafctl(t, "auth", "handlers", "remove", "nonexistent-handler-xyz")
+
+	assert.NotEqual(t, 0, exitCode)
+	assert.Contains(t, stderr, "is not installed")
+}
+
+func TestIntegration_AuthListJSONNoStdoutWarnings(t *testing.T) {
+	t.Parallel()
+	stdout, _, exitCode := runScafctl(t, "auth", "list", "-o", "json")
+
+	// When exit code is 0 and there is stdout output, it must be valid JSON
+	// (no warnings mixed into stdout). Warnings should go to stderr.
+	if exitCode == 0 && strings.TrimSpace(stdout) != "" {
+		// Stdout must not contain warning emoji characters
+		assert.NotContains(t, stdout, "\u26a0", "warnings must not appear in stdout when using -o json")
+		assert.NotContains(t, stdout, "⚠", "warnings must not appear in stdout when using -o json")
+
+		// In -o json mode, non-empty stdout must be valid JSON.
+		// If it doesn't start with [ or {, that itself is a corruption issue.
+		trimmed := strings.TrimSpace(stdout)
+		if assert.True(t, strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{"),
+			"stdout in -o json mode must be valid JSON, got: %s", trimmed[:min(len(trimmed), 80)]) {
+			var parsed json.RawMessage
+			assert.NoError(t, json.Unmarshal([]byte(trimmed), &parsed), "stdout must be valid JSON when using -o json")
+		}
+	}
+}
+
+func TestIntegration_AuthListPurgeHelp(t *testing.T) {
+	t.Parallel()
+	stdout, _, exitCode := runScafctl(t, "auth", "list", "--help")
+
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, stdout, "purge-expired")
+}
+
+func TestIntegration_AuthDiagnoseHelp(t *testing.T) {
+	t.Parallel()
+	stdout, _, exitCode := runScafctl(t, "auth", "diagnose", "--help")
+
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, stdout, "Run auth diagnostics")
+	assert.Contains(t, stdout, "--live-token")
+}
+
+func TestIntegration_AuthDiagnoseRuns(t *testing.T) {
+	t.Parallel()
+	stdout, stderr, exitCode := runScafctl(t, "auth", "diagnose")
+
+	// diagnose should complete (exit 0 or non-zero based on handler state)
+	// but must not panic or produce empty output
+	t.Logf("stdout: %s", stdout)
+	t.Logf("stderr: %s", stderr)
+	combined := stdout + stderr
+	assert.True(t, exitCode == 0 || exitCode == 1, "expected exit code 0 or 1, got %d", exitCode)
+	assert.Contains(t, combined, "auth registry", "expected auth registry check in output")
+}
+
+func TestIntegration_AuthDiagnoseJSON(t *testing.T) {
+	t.Parallel()
+	stdout, _, exitCode := runScafctl(t, "auth", "diagnose", "-o", "json")
+
+	// JSON output mode should produce valid JSON
+	if exitCode == 0 && strings.TrimSpace(stdout) != "" {
+		var result interface{}
+		assert.NoError(t, json.Unmarshal([]byte(stdout), &result), "diagnose -o json must produce valid JSON")
+	}
+}
+
+func TestIntegration_AuthDiagnoseAlias(t *testing.T) {
+	t.Parallel()
+	stdout, _, exitCode := runScafctl(t, "auth", "doctor", "--help")
+
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, stdout, "Run auth diagnostics")
+}
+
+func TestIntegration_AuthDiagnoseUnknownHandler(t *testing.T) {
+	t.Parallel()
+	_, stderr, exitCode := runScafctl(t, "auth", "diagnose", "nonexistent-xyz")
+
+	assert.NotEqual(t, 0, exitCode)
+	assert.Contains(t, stderr, "nonexistent-xyz")
 }
 
 // ============================================================================
@@ -2769,11 +2888,14 @@ func TestIntegration_CustomOAuth2Handler_AuthList(t *testing.T) {
 `
 	require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0o600))
 
-	stdout, _, exitCode := runScafctl(t, "--config", configPath, "auth", "list")
-
+	// auth list should succeed (no tokens for custom handler, but no error)
+	_, _, exitCode := runScafctl(t, "--config", configPath, "auth", "list")
 	assert.Equal(t, 0, exitCode)
-	// The custom handler should be registered and appear in the list.
-	assert.Contains(t, stdout, "test-quay", "expected custom handler to appear in output, got: %q", stdout)
+
+	// Verify the custom handler is registered via auth handlers
+	stdout, _, exitCode := runScafctl(t, "--config", configPath, "auth", "handlers")
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, stdout, "test-quay", "expected custom handler to appear in handlers output, got: %q", stdout)
 }
 
 func TestIntegration_CustomOAuth2Handler_AuthStatus(t *testing.T) {
@@ -2843,23 +2965,13 @@ func TestIntegration_CatalogListHelp(t *testing.T) {
 
 func TestIntegration_CatalogList_Empty(t *testing.T) {
 	t.Parallel()
-	// Create a temp directory for the catalog — no local artifacts.
-	// XDG_CONFIG_HOME is also isolated to prevent the binary from reading
-	// the real config, which may reference remote catalogs that require
-	// auth or are unreachable in CI.
-	tmpDir := t.TempDir()
-	env := map[string]string{
-		"XDG_DATA_HOME":   tmpDir,
-		"XDG_CACHE_HOME":  tmpDir,
-		"XDG_CONFIG_HOME": tmpDir,
-	}
+	// Use isolated env that disables the official remote catalog to avoid
+	// network dependencies. This test verifies local-only behavior.
+	env := isolatedCatalogEnv(t)
 
 	stdout, _, exitCode := runScafctlWithEnv(t, env, "catalog", "list", "-o", "json")
 
 	assert.Equal(t, 0, exitCode)
-	// With no local artifacts, the output depends on whether the default
-	// remote catalog is reachable. Either an empty list or remote results
-	// are both valid outcomes.
 	trimmed := strings.TrimSpace(stdout)
 	assert.True(t, json.Valid([]byte(trimmed)),
 		"expected valid JSON output, got: %q", stdout)
@@ -3266,12 +3378,9 @@ func TestIntegration_ExplainSolution_FromCatalog_ByName(t *testing.T) {
 
 func TestIntegration_Lint_FromCatalog_ByName(t *testing.T) {
 	t.Parallel()
-	// Create a temp directory for the catalog
-	tmpDir := t.TempDir()
-	env := map[string]string{
-		"XDG_DATA_HOME":  tmpDir,
-		"XDG_CACHE_HOME": tmpDir,
-	}
+	// Use isolated env that disables the official remote catalog to avoid
+	// network dependencies. This test only exercises local catalog lookup.
+	env := isolatedCatalogEnv(t)
 
 	// Build a solution into the catalog
 	_, _, exitCode := runScafctlWithEnv(t, env, "build", "solution", "-f", "examples/resolver-demo.yaml", "--version", "1.0.0")
@@ -3282,6 +3391,58 @@ func TestIntegration_Lint_FromCatalog_ByName(t *testing.T) {
 	assert.Equal(t, 0, exitCode)
 	// Should have lint output
 	assert.Contains(t, stdout, "findings")
+}
+
+// =============================================================================
+// Remote Catalog Integration Tests (local OCI registry)
+// =============================================================================
+
+func TestIntegration_CatalogList_RemoteRegistry(t *testing.T) {
+	t.Parallel()
+	// Start a local OCI registry and list from it directly using --catalog.
+	// This exercises remote catalog enumeration and tag fetching without
+	// any network dependency on external registries.
+	registryAddr, reg := startOCIRegistry(t)
+	env := isolatedCatalogEnv(t)
+
+	// Pre-populate the registry with fake artifacts to verify enumeration.
+	reg.mu.Lock()
+	reg.repos["scafctl/solutions/demo-app"] = map[string]string{
+		"1.0.0": "sha256:aaaa",
+		"2.0.0": "sha256:bbbb",
+	}
+	reg.mu.Unlock()
+
+	// List from the local registry by URL (--catalog <url> --insecure)
+	stdout, _, exitCode := runScafctlWithEnv(t, env, "catalog", "list",
+		"--catalog", registryAddr+"/scafctl",
+		"--insecure", "-o", "json")
+
+	assert.Equal(t, 0, exitCode)
+	trimmed := strings.TrimSpace(stdout)
+	assert.True(t, json.Valid([]byte(trimmed)),
+		"expected valid JSON output, got: %q", stdout)
+	// The remote registry has an artifact — should appear in results
+	assert.Contains(t, stdout, "demo-app")
+}
+
+func TestIntegration_CatalogPush_LocalRegistry(t *testing.T) {
+	t.Parallel()
+	// Build a solution locally, then push to the local OCI registry.
+	// This exercises the full push flow against a real OCI-compatible server.
+	registryAddr, _ := startOCIRegistry(t)
+	env := isolatedCatalogEnv(t)
+
+	// Build solution artifact
+	_, _, exitCode := runScafctlWithEnv(t, env, "build", "solution", "-f", "examples/resolver-demo.yaml", "--version", "1.0.0")
+	require.Equal(t, 0, exitCode)
+
+	// Push to the local registry by URL
+	_, stderr, exitCode := runScafctlWithEnv(t, env, "catalog", "push",
+		"resolver-demo@1.0.0",
+		"--catalog", registryAddr+"/scafctl",
+		"--insecure")
+	assert.Equal(t, 0, exitCode, "push failed: %s", stderr)
 }
 
 // Get Solution from Catalog Tests
@@ -4365,6 +4526,19 @@ spec:
 	assert.Equal(t, 0, exitCode, "expected exit code 0, got %d", exitCode)
 	assert.Contains(t, stdout, "hello from child")
 	assert.Contains(t, stdout, "with timeout")
+}
+
+func TestIntegration_SolutionResolver_AuthProviderUnavailable(t *testing.T) {
+	t.Parallel()
+	_, stderr, exitCode := runScafctl(t,
+		"run", "resolver",
+		"-f", "tests/integration/solutions/resolvers/auth-provider/solution.yaml",
+		"-o", "json",
+	)
+	t.Logf("stderr: %s", stderr)
+	// Should fail because the auth handler doesn't exist
+	assert.NotEqual(t, 0, exitCode)
+	assert.Contains(t, stderr, "nonexistent-handler-xyz", "error should reference the missing handler name")
 }
 
 // ============================================================================
@@ -5954,68 +6128,57 @@ func TestIntegration_LintExplain_JSON(t *testing.T) {
 // Examples Command Tests (Sprint 5)
 // ============================================================================
 
-func TestIntegration_Examples_Help(t *testing.T) {
+func TestIntegration_Examples_RootCommandRemoved(t *testing.T) {
 	t.Parallel()
-	stdout, _, exitCode := runScafctl(t, "examples", "--help")
-	assert.Equal(t, 0, exitCode)
-	assert.Contains(t, stdout, "list")
-	assert.Contains(t, stdout, "get")
+	_, stderr, exitCode := runScafctl(t, "examples", "--help")
+	assert.NotEqual(t, 0, exitCode)
+	assert.Contains(t, stderr, "unknown command")
 }
 
-func TestIntegration_Examples_List(t *testing.T) {
+func TestIntegration_GetExamples_List(t *testing.T) {
 	t.Parallel()
-	stdout, _, exitCode := runScafctl(t, "examples", "list", "-o", "yaml")
+	stdout, _, exitCode := runScafctl(t, "get", "examples", "-o", "yaml")
 	assert.Equal(t, 0, exitCode)
 	assert.Contains(t, stdout, "path:")
 	assert.Contains(t, stdout, "category:")
 	assert.Contains(t, stdout, "description:")
 }
 
-func TestIntegration_Examples_List_JSON(t *testing.T) {
+func TestIntegration_GetExamples_List_FilterCategory(t *testing.T) {
 	t.Parallel()
-	stdout, _, exitCode := runScafctl(t, "examples", "list", "-o", "json")
-	assert.Equal(t, 0, exitCode)
-
-	var examples []map[string]any
-	require.NoError(t, json.Unmarshal([]byte(stdout), &examples))
-	assert.Greater(t, len(examples), 0)
-	assert.Contains(t, examples[0], "path")
-	assert.Contains(t, examples[0], "category")
-}
-
-func TestIntegration_Examples_List_FilterCategory(t *testing.T) {
-	t.Parallel()
-	stdout, _, exitCode := runScafctl(t, "examples", "list", "--category", "solutions")
+	stdout, _, exitCode := runScafctl(t, "get", "examples", "--category", "solutions")
 	assert.Equal(t, 0, exitCode)
 	assert.Contains(t, stdout, "solutions")
 }
 
-func TestIntegration_Examples_Get(t *testing.T) {
+func TestIntegration_GetExamples_Get(t *testing.T) {
 	t.Parallel()
-	// Get a known example — resolver-demo.yaml is a top-level example
-	stdout, _, exitCode := runScafctl(t, "examples", "get", "resolver-demo.yaml")
+	stdout, _, exitCode := runScafctl(t, "get", "examples", "resolver-demo.yaml")
 	assert.Equal(t, 0, exitCode)
 	assert.NotEmpty(t, stdout)
 }
 
-func TestIntegration_Examples_Get_NotFound(t *testing.T) {
+func TestIntegration_GetExamples_Get_JSON(t *testing.T) {
 	t.Parallel()
-	_, _, exitCode := runScafctl(t, "examples", "get", "nonexistent-example.yaml")
+	stdout, _, exitCode := runScafctl(t, "get", "examples", "resolver-demo.yaml", "-o", "json")
+	assert.Equal(t, 0, exitCode)
+
+	var example map[string]any
+	require.NoError(t, json.Unmarshal([]byte(stdout), &example))
+	assert.Equal(t, "scafctl.io/v1", example["apiVersion"])
+	assert.Contains(t, example, "metadata")
+}
+
+func TestIntegration_GetExamples_Get_NotFound(t *testing.T) {
+	t.Parallel()
+	_, _, exitCode := runScafctl(t, "get", "examples", "nonexistent-example.yaml")
 	assert.NotEqual(t, 0, exitCode)
 }
 
-func TestIntegration_Examples_Get_OutputFile(t *testing.T) {
+func TestIntegration_GetExamples_Get_InvalidOutputFormat(t *testing.T) {
 	t.Parallel()
-	tmpDir := t.TempDir()
-	outFile := filepath.Join(tmpDir, "output.yaml")
-
-	_, _, exitCode := runScafctl(t, "examples", "get", "resolver-demo.yaml", "-o", outFile)
-	assert.Equal(t, 0, exitCode)
-
-	// Verify the file was written
-	data, err := os.ReadFile(outFile)
-	require.NoError(t, err)
-	assert.NotEmpty(t, data)
+	_, _, exitCode := runScafctl(t, "get", "examples", "resolver-demo.yaml", "-o", "invalid-format")
+	assert.NotEqual(t, 0, exitCode)
 }
 
 // ============================================================================
@@ -6545,9 +6708,9 @@ func TestIntegration_Plugins_List_EmptyCache(t *testing.T) {
 		"XDG_CACHE_HOME": tmpDir,
 	}
 
-	stdout, _, exitCode := runScafctlWithEnv(t, env, "plugins", "list")
+	_, stderr, exitCode := runScafctlWithEnv(t, env, "plugins", "list")
 	assert.Equal(t, 0, exitCode)
-	assert.Contains(t, stdout, "No plugins cached")
+	assert.Contains(t, stderr, "No plugins cached")
 }
 
 // TestIntegration_Plugins_List_JSON verifies plugins list supports JSON output.
@@ -6985,6 +7148,27 @@ func TestIntegration_MCPServeInfo_ExplainConcepts(t *testing.T) {
 		toolNames[tool.Name] = true
 	}
 	assert.True(t, toolNames["explain_concepts"], "expected explain_concepts tool to be registered")
+}
+
+func TestIntegration_MCPServeInfo_AuthTokenTools(t *testing.T) {
+	t.Parallel()
+
+	stdout, _, exitCode := runScafctl(t, "mcp", "serve", "--info")
+	assert.Equal(t, 0, exitCode)
+
+	var info struct {
+		Tools []struct {
+			Name string `json:"name"`
+		} `json:"tools"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(stdout), &info))
+
+	toolNames := make(map[string]bool)
+	for _, tool := range info.Tools {
+		toolNames[tool.Name] = true
+	}
+	assert.True(t, toolNames["auth_list_tokens"], "expected auth_list_tokens tool to be registered")
+	assert.True(t, toolNames["auth_purge_expired"], "expected auth_purge_expired tool to be registered")
 }
 
 func TestIntegration_MCPListHelp(t *testing.T) {
@@ -8348,11 +8532,254 @@ func TestIntegration_PluginExecution_GetProviderSchema(t *testing.T) {
 	assert.Contains(t, stderr, "not found")
 }
 
+func TestIntegration_GetProvider_OfficialMetadata(t *testing.T) {
+	t.Parallel()
+	// Official plugin providers (exec, git, etc.) should return metadata
+	// even when the plugin binary cannot be fetched.
+	stdout, _, exitCode := runScafctl(t, "get", "provider", "exec", "-o", "json")
+
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, stdout, `"name"`)
+	assert.Contains(t, stdout, `"exec"`)
+	assert.Contains(t, stdout, `"source"`)
+	assert.Contains(t, stdout, `"official"`)
+}
+
+func TestIntegration_MCPServe_GetProviderSchema_Builtin(t *testing.T) {
+	t.Parallel()
+	// Verify the MCP get_provider_schema tool returns full schema for
+	// builtin providers via JSON-RPC protocol.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binaryPath, "mcp", "serve")
+	cmd.Dir = findProjectRoot()
+
+	messages := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}`,
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_provider_schema","arguments":{"name":"cel"}}}`,
+	}, "\n")
+	cmd.Stdin = strings.NewReader(messages + "\n")
+
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+
+	_ = cmd.Run()
+
+	output := outBuf.String()
+	// Find the tools/call response (id:2)
+	var schemaResp string
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, `"id":2`) {
+			schemaResp = line
+			break
+		}
+	}
+	require.NotEmpty(t, schemaResp, "expected tools/call response for id 2")
+	assert.Contains(t, schemaResp, "cel")
+	assert.Contains(t, schemaResp, "expression")
+	assert.NotContains(t, schemaResp, "NOT_FOUND")
+}
+
+func TestIntegration_MCPServe_GetProviderSchema_OfficialFallback(t *testing.T) {
+	t.Parallel()
+	// When an official plugin provider can't be fetched (no fetcher in test
+	// env), get_provider_schema should return a helpful NOT_FOUND response
+	// with guidance rather than crashing.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binaryPath, "mcp", "serve")
+	cmd.Dir = findProjectRoot()
+
+	messages := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}`,
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_provider_schema","arguments":{"name":"exec"}}}`,
+	}, "\n")
+	cmd.Stdin = strings.NewReader(messages + "\n")
+
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+
+	_ = cmd.Run()
+
+	output := outBuf.String()
+	var schemaResp string
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, `"id":2`) {
+			schemaResp = line
+			break
+		}
+	}
+	require.NotEmpty(t, schemaResp, "expected tools/call response for id 2")
+	// Should mention exec and provide useful context (either schema if cached,
+	// or NOT_FOUND with guidance about the plugin).
+	assert.Contains(t, schemaResp, "exec")
+}
+
+func TestIntegration_MCPServe_GetProviderSchema_CachedDescriptor(t *testing.T) {
+	t.Parallel()
+	// Pre-populate the provider schema cache with a fake descriptor.
+	// When the plugin binary is unavailable, get_provider_schema should
+	// return the cached descriptor with "source": "cached".
+	cacheDir := t.TempDir()
+
+	// Write a minimal cached descriptor entry (use current time so TTL check passes).
+	// Note: the Descriptor struct tags the input schema as "schema" (not "inputSchema").
+	cacheEntry := fmt.Sprintf(`{
+		"cachedAt": %q,
+		"descriptor": {
+			"name": "fake-cached-provider",
+			"apiVersion": "v1",
+			"version": "1.0.0",
+			"description": "A test cached provider",
+			"capabilities": ["from"],
+			"schema": {
+				"type": "object",
+				"properties": {
+					"input1": {"type": "string", "description": "Test input"}
+				}
+			}
+		}
+	}`, time.Now().UTC().Format(time.RFC3339))
+	err := os.MkdirAll(cacheDir, 0o755)
+	require.NoError(t, err)
+	err = os.WriteFile(filepath.Join(cacheDir, "fake-cached-provider.json"), []byte(cacheEntry), 0o600)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binaryPath, "mcp", "serve")
+	cmd.Dir = findProjectRoot()
+	cmd.Env = append(os.Environ(), "XDG_CACHE_HOME="+filepath.Dir(cacheDir))
+
+	// The cache expects the path: $XDG_CACHE_HOME/scafctl/provider-schemas/
+	// So we need to create the proper directory structure
+	properCacheDir := filepath.Join(t.TempDir(), "scafctl", "provider-schemas")
+	err = os.MkdirAll(properCacheDir, 0o755)
+	require.NoError(t, err)
+	err = os.WriteFile(filepath.Join(properCacheDir, "fake-cached-provider.json"), []byte(cacheEntry), 0o600)
+	require.NoError(t, err)
+
+	xdgCacheHome := filepath.Dir(filepath.Dir(properCacheDir)) // parent of scafctl/
+	cmd.Env = append(os.Environ(), "XDG_CACHE_HOME="+xdgCacheHome)
+
+	messages := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}`,
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_provider_schema","arguments":{"name":"fake-cached-provider"}}}`,
+	}, "\n")
+	cmd.Stdin = strings.NewReader(messages + "\n")
+
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+
+	_ = cmd.Run()
+
+	output := outBuf.String()
+	var schemaResp string
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, `"id":2`) {
+			schemaResp = line
+			break
+		}
+	}
+	require.NotEmpty(t, schemaResp, "expected tools/call response for id 2")
+	assert.Contains(t, schemaResp, "fake-cached-provider")
+	assert.Contains(t, schemaResp, "cached")
+	assert.Contains(t, schemaResp, "input1")
+}
+
 func TestIntegration_PluginsList_RunsSuccessfully(t *testing.T) {
 	t.Parallel()
 	_, _, exitCode := runScafctl(t, "plugins", "list")
 
 	assert.Equal(t, 0, exitCode)
+}
+
+func TestIntegration_PluginsList_PathNotInTable(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+
+	// Seed a fake plugin binary so the table is actually rendered.
+	platform := runtime.GOOS + "-" + runtime.GOARCH
+	pluginDir := filepath.Join(cacheDir, "scafctl", "plugins", "fake-plugin", "1.0.0", platform)
+	require.NoError(t, os.MkdirAll(pluginDir, 0o755))
+	binName := "fake-plugin"
+	if runtime.GOOS == "windows" {
+		binName += ".exe"
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(pluginDir, binName), []byte("#!/bin/sh\nexit 0"), 0o755))
+
+	stdout, _, exitCode := runScafctlWithEnv(t, map[string]string{"XDG_CACHE_HOME": cacheDir}, "plugins", "list")
+
+	assert.Equal(t, 0, exitCode)
+	// Table should render with the version column visible
+	assert.Contains(t, stdout, "version")
+	// Path column should be hidden via column hints
+	assert.NotContains(t, stdout, "path")
+}
+
+func TestIntegration_RunProvider_VersionPinFlag(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	// Using a non-existent version should fail gracefully with a clear error
+	_, stderr, exitCode := runScafctlWithEnv(t, map[string]string{"XDG_CACHE_HOME": cacheDir}, "run", "provider", "exec", "--plugin-version", "99.99.99", "command=echo hi")
+
+	assert.NotEqual(t, 0, exitCode)
+	assert.Contains(t, stderr, "99.99.99")
+}
+
+func TestIntegration_RunProvider_AtVersionSyntax(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	// Using name@version with a non-existent version should fail gracefully
+	_, stderr, exitCode := runScafctlWithEnv(t, map[string]string{"XDG_CACHE_HOME": cacheDir}, "run", "provider", "exec@99.99.99", "command=echo hi")
+
+	assert.NotEqual(t, 0, exitCode)
+	assert.Contains(t, stderr, "99.99.99")
+}
+
+func TestIntegration_RunProvider_HelpShowsVersionPinning(t *testing.T) {
+	t.Parallel()
+	stdout, _, exitCode := runScafctl(t, "run", "provider", "--help")
+
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, stdout, "--plugin-version")
+}
+
+func TestIntegration_RunProvider_BuiltinVersionPinWarning(t *testing.T) {
+	t.Parallel()
+	// Builtin provider with version 1.0.0 -- pinning to a different version should error.
+	_, stderr, exitCode := runScafctl(t, "run", "provider", "static", "--plugin-version", "2.0.0", "value=hello")
+
+	assert.NotEqual(t, 0, exitCode)
+	assert.Contains(t, stderr, "version")
+	assert.Contains(t, stderr, "2.0.0")
+}
+
+func TestIntegration_RunProvider_BuiltinVersionPinMatch(t *testing.T) {
+	t.Parallel()
+	// Builtin provider with version 1.0.0 -- pinning to 1.0.0 should succeed.
+	stdout, _, exitCode := runScafctl(t, "run", "provider", "static", "--plugin-version", "1.0.0", "value=hello")
+
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, stdout, "hello")
+}
+
+func TestIntegration_GetProvider_VersionColumn(t *testing.T) {
+	t.Parallel()
+	stdout, _, exitCode := runScafctl(t, "get", "provider", "-o", "json")
+
+	assert.Equal(t, 0, exitCode)
+	// JSON output should include version field for providers
+	assert.Contains(t, stdout, "\"version\"")
 }
 
 // ============================================================================
@@ -8427,6 +8854,186 @@ func TestIntegration_InspectSolution_Alias(t *testing.T) {
 
 	assert.Equal(t, 0, exitCode)
 	assert.Contains(t, stdout, "\"name\"")
+}
+
+// ============================================================================
+// Auto-Discovery: Taskfile and Multi-Match Tests
+// ============================================================================
+
+func TestIntegration_Lint_AutoDiscovery_TaskfileYaml(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	// Only a taskfile.yaml exists — should be auto-discovered
+	taskfile := filepath.Join(tmpDir, "taskfile.yaml")
+	content := `apiVersion: scafctl.io/v1
+kind: Solution
+metadata:
+  name: taskfile-discovery
+  version: 1.0.0
+spec:
+  resolvers:
+    greeting:
+      resolve:
+        with:
+          - provider: static
+            inputs:
+              value: Hello from taskfile
+`
+	require.NoError(t, os.WriteFile(taskfile, []byte(content), 0o644))
+
+	stdout, stderr, exitCode := runScafctlInDir(t, tmpDir, "lint", "-o", "json")
+	t.Logf("stdout: %s", stdout)
+	t.Logf("stderr: %s", stderr)
+
+	assert.True(t, exitCode == 0 || exitCode == 2, "lint should exit 0 or 2, got %d", exitCode)
+	assert.Contains(t, stdout, "findings")
+}
+
+func TestIntegration_Lint_AutoDiscovery_MultiMatch_Warning(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	// Place two solution files — low-risk command should warn
+	solutionYAML := `apiVersion: scafctl.io/v1
+kind: Solution
+metadata:
+  name: multi-match
+  version: 1.0.0
+spec:
+  resolvers:
+    greeting:
+      resolve:
+        with:
+          - provider: static
+            inputs:
+              value: Hello
+`
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "solution.yaml"), []byte(solutionYAML), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "taskfile.yaml"), []byte(solutionYAML), 0o644))
+
+	stdout, stderr, exitCode := runScafctlInDir(t, tmpDir, "lint", "-o", "json")
+	t.Logf("stdout: %s", stdout)
+	t.Logf("stderr: %s", stderr)
+
+	// Should succeed (low risk); multi-match message is verbose-only now
+	assert.True(t, exitCode == 0 || exitCode == 2, "lint should exit 0 or 2, got %d", exitCode)
+	assert.NotContains(t, stderr, "Multiple solution files found")
+
+	// With --verbose the message appears
+	_, stderrV, exitCodeV := runScafctlInDir(t, tmpDir, "lint", "-o", "json", "--verbose")
+	assert.True(t, exitCodeV == 0 || exitCodeV == 2, "lint --verbose should exit 0 or 2, got %d", exitCodeV)
+	assert.Contains(t, stderrV, "Multiple solution files found")
+}
+
+func TestIntegration_BuildSolution_AutoDiscovery_MultiMatch_Error(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	// Place two solution files — high-risk command should error
+	solutionYAML := `apiVersion: scafctl.io/v1
+kind: Solution
+metadata:
+  name: multi-match-build
+  version: 1.0.0
+spec:
+  resolvers:
+    greeting:
+      resolve:
+        with:
+          - provider: static
+            inputs:
+              value: Hello
+`
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "solution.yaml"), []byte(solutionYAML), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "taskfile.yaml"), []byte(solutionYAML), 0o644))
+
+	_, stderr, exitCode := runScafctlInDir(t, tmpDir, "build", "solution")
+	t.Logf("stderr: %s", stderr)
+
+	assert.NotEqual(t, 0, exitCode)
+	assert.Contains(t, stderr, "multiple solution files found")
+	assert.Contains(t, stderr, "use -f/--file")
+}
+
+func TestIntegration_RunResolver_AutoDiscovery_TaskfileYaml(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	// Only a taskfile.yaml exists — run resolver should auto-discover it
+	taskfile := filepath.Join(tmpDir, "taskfile.yaml")
+	content := `apiVersion: scafctl.io/v1
+kind: Solution
+metadata:
+  name: taskfile-run-resolver
+  version: 1.0.0
+spec:
+  resolvers:
+    greeting:
+      type: string
+      resolve:
+        with:
+          - provider: static
+            inputs:
+              value: Hello from taskfile resolver
+`
+	require.NoError(t, os.WriteFile(taskfile, []byte(content), 0o644))
+
+	stdout, stderr, exitCode := runScafctlInDir(t, tmpDir, "run", "resolver", "-o", "json")
+	t.Logf("stdout: %s", stdout)
+	t.Logf("stderr: %s", stderr)
+
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, stdout, "Hello from taskfile resolver")
+}
+
+func TestIntegration_RunResolver_AutoDiscovery_MultiMatch_Warning(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	// Place solution.yaml and taskfile.yaml — run resolver (low-risk) should
+	// use solution.yaml (higher priority) and warn about the other.
+	solutionYAML := `apiVersion: scafctl.io/v1
+kind: Solution
+metadata:
+  name: multi-match-resolver
+  version: 1.0.0
+spec:
+  resolvers:
+    greeting:
+      type: string
+      resolve:
+        with:
+          - provider: static
+            inputs:
+              value: from solution.yaml
+`
+	taskfileYAML := `apiVersion: scafctl.io/v1
+kind: Solution
+metadata:
+  name: multi-match-taskfile
+  version: 1.0.0
+spec:
+  resolvers:
+    greeting:
+      type: string
+      resolve:
+        with:
+          - provider: static
+            inputs:
+              value: from taskfile.yaml
+`
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "solution.yaml"), []byte(solutionYAML), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "taskfile.yaml"), []byte(taskfileYAML), 0o644))
+
+	stdout, stderr, exitCode := runScafctlInDir(t, tmpDir, "run", "resolver", "-o", "json")
+	t.Logf("stdout: %s", stdout)
+	t.Logf("stderr: %s", stderr)
+
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, stdout, "from solution.yaml")
+	// Multi-match message is verbose-only; should not appear by default
+	assert.NotContains(t, stderr, "Multiple solution files found")
 }
 
 // ============================================================================
