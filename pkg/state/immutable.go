@@ -51,7 +51,7 @@ func CheckImmutables(stateData *Data, resolverCtx *resolver.Context, resolvers [
 
 		// Subsequent run: verify the value matches
 		if !immutableValuesEqual(existing.Value, result.Value) {
-			return fmt.Errorf("%w %q: resolved value differs from locked value; use 'scafctl state delete' to remove it first", ErrImmutableEntry, r.Name)
+			return fmt.Errorf("%w %q: resolved value differs from locked value; use the state delete command to remove it first", ErrImmutableEntry, r.Name)
 		}
 	}
 

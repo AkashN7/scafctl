@@ -1121,18 +1121,32 @@ func lintStateResolverRefs(sol *solution.Solution, result *Result) {
 	}
 }
 
-// lintImmutableResolvers checks that resolvers with immutable: true are in a
-// solution that has state configured. Without state, the immutable value cannot
-// be persisted and the flag has no effect.
-func lintImmutableResolvers(sol *solution.Solution, _ *Result) {
+// lintImmutableResolvers checks that resolvers with immutable: true have a
+// state provider in their resolve chain so that the locked value is read from
+// state on subsequent runs instead of re-executing and potentially diverging.
+func lintImmutableResolvers(sol *solution.Solution, result *Result) {
 	for name, res := range sol.Spec.Resolvers {
 		if res == nil || !res.Immutable {
 			continue
 		}
 		location := fmt.Sprintf("resolvers.%s", name)
 
-		// State block is present (guaranteed by caller lintState),
-		// so immutable resolvers are valid. No further checks needed.
-		_ = location
+		// Check if the resolve chain includes the state provider.
+		hasStateProvider := false
+		if res.Resolve != nil {
+			for _, src := range res.Resolve.With {
+				if src.Provider == "state" {
+					hasStateProvider = true
+					break
+				}
+			}
+		}
+
+		if !hasStateProvider {
+			result.addFinding(SeverityWarning, "state", location,
+				fmt.Sprintf("resolver %q has immutable: true but does not read from the state provider in its resolve chain", name),
+				"Add a state provider step at the start of the resolve chain to read the persisted value before falling back to other providers.",
+				"immutable-no-state-read")
+		}
 	}
 }

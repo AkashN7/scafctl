@@ -6,6 +6,7 @@ package action
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
@@ -840,6 +841,14 @@ func validateSources(action *Action, section string, errs *AggregatedValidationE
 				Message:    fmt.Sprintf("invalid glob pattern: %q", pattern),
 			})
 		}
+		if err := validateGlobSafety(pattern); err != nil {
+			errs.AddError(&ValidationError{
+				Section:    section,
+				ActionName: action.Name,
+				Field:      "sources",
+				Message:    err.Error(),
+			})
+		}
 	}
 	for _, pattern := range action.Generates {
 		if !doublestar.ValidatePattern(pattern) {
@@ -848,6 +857,14 @@ func validateSources(action *Action, section string, errs *AggregatedValidationE
 				ActionName: action.Name,
 				Field:      "generates",
 				Message:    fmt.Sprintf("invalid glob pattern: %q", pattern),
+			})
+		}
+		if err := validateGlobSafety(pattern); err != nil {
+			errs.AddError(&ValidationError{
+				Section:    section,
+				ActionName: action.Name,
+				Field:      "generates",
+				Message:    err.Error(),
 			})
 		}
 	}
@@ -860,6 +877,20 @@ func validateSources(action *Action, section string, errs *AggregatedValidationE
 			Message:    "generates requires sources to be set",
 		})
 	}
+}
+
+// validateGlobSafety rejects absolute patterns and path traversal segments
+// to prevent fingerprinting files outside the solution tree.
+func validateGlobSafety(pattern string) error {
+	if filepath.IsAbs(pattern) {
+		return fmt.Errorf("absolute patterns not allowed: %q", pattern)
+	}
+	for _, seg := range strings.Split(filepath.Clean(pattern), string(filepath.Separator)) {
+		if seg == ".." {
+			return fmt.Errorf("path traversal not allowed: %q", pattern)
+		}
+	}
+	return nil
 }
 
 // validateNoCycles checks for dependency cycles within a section.

@@ -1268,6 +1268,7 @@ func TestLintTemplateUnderscorePrefix(t *testing.T) {
 	}
 }
 
+//nolint:unparam // capability is parameterized for test flexibility
 func newStateProvider(name string, capability provider.Capability) *fakeProvider {
 	outputSchema := &jsonschema.Schema{Type: "object"}
 	if capability == provider.CapabilityState {
@@ -1489,4 +1490,114 @@ func TestLintResolveForEach(t *testing.T) {
 	require.Len(t, findings, 1)
 	assert.Contains(t, findings[0].Message, "forEach on resolve step")
 	assert.Equal(t, SeverityWarning, findings[0].Severity)
+}
+
+func TestLintImmutableResolvers_NoStateProvider(t *testing.T) {
+	sol := &solution.Solution{
+		APIVersion: "scafctl.io/v1",
+		Kind:       "Solution",
+		Metadata:   solution.Metadata{Name: "test"},
+		Spec: solution.Spec{
+			Resolvers: map[string]*resolver.Resolver{
+				"cluster_id": {
+					Type:      "string",
+					Immutable: true,
+					Resolve: &resolver.ResolvePhase{
+						With: []resolver.ProviderSource{
+							{Provider: "exec"},
+						},
+					},
+				},
+			},
+		},
+		State: &state.Config{
+			Enabled: &spec.ValueRef{Literal: true},
+			Backend: state.Backend{
+				Provider: "file",
+				Inputs:   map[string]*spec.ValueRef{"path": {Literal: "state.json"}},
+			},
+		},
+	}
+	reg := provider.NewRegistry()
+	_ = reg.Register(newFakeProvider("exec", nil))
+	_ = reg.Register(newStateProvider("file", provider.CapabilityState))
+
+	result := Solution(sol, "test.yaml", reg)
+	findings := filterFindingsByRule(result, "immutable-no-state-read")
+	require.Len(t, findings, 1)
+	assert.Contains(t, findings[0].Message, "cluster_id")
+	assert.Contains(t, findings[0].Message, "does not read from the state provider")
+	assert.Equal(t, SeverityWarning, findings[0].Severity)
+}
+
+func TestLintImmutableResolvers_WithStateProvider(t *testing.T) {
+	sol := &solution.Solution{
+		APIVersion: "scafctl.io/v1",
+		Kind:       "Solution",
+		Metadata:   solution.Metadata{Name: "test"},
+		Spec: solution.Spec{
+			Resolvers: map[string]*resolver.Resolver{
+				"cluster_id": {
+					Type:      "string",
+					Immutable: true,
+					Resolve: &resolver.ResolvePhase{
+						With: []resolver.ProviderSource{
+							{Provider: "state", Inputs: map[string]*spec.ValueRef{"key": {Literal: "cluster_id"}}},
+							{Provider: "exec"},
+						},
+					},
+				},
+			},
+		},
+		State: &state.Config{
+			Enabled: &spec.ValueRef{Literal: true},
+			Backend: state.Backend{
+				Provider: "file",
+				Inputs:   map[string]*spec.ValueRef{"path": {Literal: "state.json"}},
+			},
+		},
+	}
+	reg := provider.NewRegistry()
+	_ = reg.Register(newFakeProvider("exec", nil))
+	_ = reg.Register(newFakeProvider("state", nil))
+	_ = reg.Register(newStateProvider("file", provider.CapabilityState))
+
+	result := Solution(sol, "test.yaml", reg)
+	findings := filterFindingsByRule(result, "immutable-no-state-read")
+	assert.Empty(t, findings)
+}
+
+func TestLintImmutableResolvers_NotImmutable(t *testing.T) {
+	sol := &solution.Solution{
+		APIVersion: "scafctl.io/v1",
+		Kind:       "Solution",
+		Metadata:   solution.Metadata{Name: "test"},
+		Spec: solution.Spec{
+			Resolvers: map[string]*resolver.Resolver{
+				"cluster_id": {
+					Type:      "string",
+					Immutable: false,
+					Resolve: &resolver.ResolvePhase{
+						With: []resolver.ProviderSource{
+							{Provider: "exec"},
+						},
+					},
+				},
+			},
+		},
+		State: &state.Config{
+			Enabled: &spec.ValueRef{Literal: true},
+			Backend: state.Backend{
+				Provider: "http",
+				Inputs:   map[string]*spec.ValueRef{"url": {Literal: "https://state.example.com"}},
+			},
+		},
+	}
+	reg := provider.NewRegistry()
+	_ = reg.Register(newFakeProvider("exec", nil))
+	_ = reg.Register(newStateProvider("http", provider.CapabilityState))
+
+	result := Solution(sol, "test.yaml", reg)
+	findings := filterFindingsByRule(result, "immutable-no-state-read")
+	assert.Empty(t, findings)
 }

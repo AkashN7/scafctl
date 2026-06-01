@@ -464,7 +464,7 @@ func TestManagerSave_Immutable(t *testing.T) {
 		assert.Error(t, err)
 		assert.ErrorIs(t, err, ErrImmutableEntry)
 		assert.Contains(t, err.Error(), "cluster_id")
-		assert.Contains(t, err.Error(), "scafctl state delete")
+		assert.Contains(t, err.Error(), "state delete")
 
 		// Backend should NOT have been called (save aborted)
 		assert.Empty(t, backend.saveCalls)
