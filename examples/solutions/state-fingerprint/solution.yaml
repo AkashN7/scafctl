@@ -1,22 +1,20 @@
 # =============================================================================
 # State + Fingerprinting Showcase: Code Generation Pipeline
 # =============================================================================
-# Demonstrates ALL state capabilities alongside fingerprinting (up-to-date
+# Demonstrates state capabilities alongside fingerprinting (up-to-date
 # checks). This solution simulates a code generation pipeline that:
 #
 #   1. Reads template files (sources)
 #   2. Generates output files (generates)
-#   3. Persists configuration and metadata to state between runs
+#   3. Persists CLI parameters to state between runs (parameter replay)
 #   4. Skips actions when source files haven't changed (fingerprinting)
 #   5. Re-executes when templates are modified or output is tampered with
 #
 # State features demonstrated:
 #   - state.enabled / state.backend configuration
-#   - saveToState on resolvers (auto-persistence)
-#   - state provider reads (fallback chain pattern)
-#   - state provider writes from actions
-#   - computed resolvers using state-backed values
-#   - sensitive resolver with state warning
+#   - Automatic parameter replay (CLI -r values saved and restored)
+#   - Immutable resolver values locked after first execution
+#   - computed resolvers using state-replayed values
 #
 # Fingerprinting features demonstrated:
 #   - sources: glob patterns tracking input files
@@ -33,13 +31,10 @@
 #   scafctl run solution -f solution.yaml -r project_name=myservice -r author=alice
 #
 # Second run (actions skipped -- sources unchanged):
-#   scafctl run solution -f solution.yaml -r project_name=myservice -r author=alice
+#   scafctl run solution -f solution.yaml
 #
 # Modify a template, then re-run (fingerprint detects change):
 #   echo '// updated' >> templates/model.go.tpl
-#   scafctl run solution -f solution.yaml -r project_name=myservice -r author=alice
-#
-# Subsequent runs without parameters (values loaded from state):
 #   scafctl run solution -f solution.yaml
 #
 # Force re-execution bypassing fingerprints:
@@ -47,8 +42,6 @@
 #
 # Inspect state:
 #   scafctl state list --path state-fingerprint-demo.json
-#   scafctl state get --path state-fingerprint-demo.json --key project_name
-#   scafctl state get --path state-fingerprint-demo.json --key generation_count
 #
 # Clear state (resets everything including fingerprints):
 #   scafctl state clear --path state-fingerprint-demo.json
@@ -85,44 +78,30 @@ state:
 spec:
   resolvers:
     # =========================================================================
-    # STATE FEATURE: Resolver with fallback chain (state -> parameter)
+    # PARAMETER REPLAY: CLI -r values saved to state and replayed
     # =========================================================================
-    # On first run: state returns ErrKeyNotFound, falls through via onError: continue
-    # to the parameter provider.
-    # On subsequent runs: state returns the cached value, chain stops early.
-    # The result is saved back to state via saveToState: true.
+    # On first run: parameter provider reads from -r flag.
+    # On subsequent runs: saved parameters are replayed via parameter provider
+    # automatically (no -r flags needed).
     project_name:
       description: Name of the project being generated
       type: string
-      saveToState: true
       resolve:
         with:
-          - provider: state
-            onError: continue
-            inputs:
-              key: "project_name"
-              required: true
           - provider: parameter
             inputs:
               key: "project_name"
 
     # =========================================================================
-    # STATE FEATURE: Another stateful resolver with default fallback
+    # PARAMETER REPLAY: With static default fallback
     # =========================================================================
-    # Demonstrates the full fallback chain: state -> parameter -> static default
+    # Demonstrates the fallback chain: parameter (replayed or CLI) -> static default
     author:
       description: Author name for generated file headers
       type: string
-      saveToState: true
       resolve:
         with:
-          - provider: state
-            onError: continue
-            inputs:
-              key: "author"
-              required: true
           - provider: parameter
-            onError: continue
             inputs:
               key: "author"
           - provider: static
@@ -130,53 +109,9 @@ spec:
               value: "anonymous"
 
     # =========================================================================
-    # STATE FEATURE: Sensitive resolver with state persistence
+    # COMPUTED RESOLVER: Uses replayed parameters in expressions
     # =========================================================================
-    # Demonstrates the lint warning: sensitive + saveToState = plaintext storage.
-    # In practice this would be an API key or license token for code generation.
-    license_key:
-      description: License key for the code generator (stored in plaintext)
-      type: string
-      sensitive: true
-      saveToState: true
-      resolve:
-        with:
-          - provider: state
-            onError: continue
-            inputs:
-              key: "license_key"
-              required: true
-          - provider: parameter
-            onError: continue
-            inputs:
-              key: "license_key"
-          - provider: static
-            inputs:
-              value: "DEMO-KEY-12345"
-
-    # =========================================================================
-    # STATE FEATURE: State read without saveToState (read-only consumption)
-    # =========================================================================
-    # Reads a counter from state that is written by an action (see below).
-    # On first run, returns the fallback value 0.
-    generation_count:
-      description: Number of times code generation has executed
-      type: string
-      resolve:
-        with:
-          - provider: state
-            onError: continue
-            inputs:
-              key: "generation_count"
-              required: true
-          - provider: static
-            inputs:
-              value: "0"
-
-    # =========================================================================
-    # COMPUTED RESOLVER: Uses state-backed values in expressions
-    # =========================================================================
-    # Demonstrates that state-persisted values flow into downstream resolvers
+    # Demonstrates that state-replayed values flow into downstream resolvers
     # via normal CEL expressions -- state is transparent to the DAG.
     output_dir:
       description: Output directory for generated files
@@ -190,12 +125,12 @@ spec:
                 expr: "'output/' + _.project_name"
 
     # =========================================================================
-    # COMPUTED RESOLVER: Build generation header from state values
+    # COMPUTED RESOLVER: Build generation header from replayed values
     # =========================================================================
     file_header:
       description: Header comment injected into every generated file
       type: string
-      dependsOn: [project_name, author, generation_count]
+      dependsOn: [project_name, author]
       resolve:
         with:
           - provider: static
@@ -204,8 +139,7 @@ spec:
                 expr: >
                   '// Code generated by scafctl. DO NOT EDIT.\n' +
                   '// Project: ' + _.project_name + '\n' +
-                  '// Author: ' + _.author + '\n' +
-                  '// Generation #' + _.generation_count
+                  '// Author: ' + _.author
 
     # =========================================================================
     # TEMPLATE DATA: Variables passed to Go templates during rendering
@@ -290,28 +224,13 @@ spec:
           outputPath: '{{ if .__fileDir }}{{ .__fileDir }}/{{ end }}{{ .__fileStem }}'
 
       # -----------------------------------------------------------------------
-      # STATE FEATURE: Action writes to state (generation counter)
-      # -----------------------------------------------------------------------
-      # Demonstrates state provider write mode from an action.
-      # Increments the generation count stored in state.
-      increment-counter:
-        description: Track how many times generation has run
-        displayName: Update Generation Counter
-        provider: state
-        dependsOn: [generate-code]
-        inputs:
-          key: "generation_count"
-          value:
-            expr: "string(int(_.generation_count) + 1)"
-
-      # -----------------------------------------------------------------------
-      # DISPLAY: Show summary using state-backed values
+      # DISPLAY: Show summary using replayed values
       # -----------------------------------------------------------------------
       show-summary:
         description: Display generation summary
         displayName: Generation Summary
         provider: message
-        dependsOn: [increment-counter]
+        dependsOn: [generate-code]
         inputs:
           message:
             expr: >
@@ -319,6 +238,5 @@ spec:
               'Project: ' + _.project_name + '\n' +
               'Author: ' + _.author + '\n' +
               'Output: ' + _.output_dir + '\n' +
-              'Run #' + string(int(_.generation_count) + 1) + '\n' +
               '--------------------------------'
           type: success

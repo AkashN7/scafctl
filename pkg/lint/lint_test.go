@@ -1380,7 +1380,7 @@ func TestLintState_ValidConfig(t *testing.T) {
 	result := Solution(sol, "test.yaml", reg)
 	stateFindings := []*Finding{}
 	for _, f := range result.Findings {
-		if f.Category == "state" || f.RuleName == "sensitive-state" {
+		if f.Category == "state" {
 			stateFindings = append(stateFindings, f)
 		}
 	}
@@ -1627,7 +1627,7 @@ func strPtr(s string) *string {
 	return &s
 }
 
-func TestLintImmutableResolvers_NoStateProvider(t *testing.T) {
+func TestLintImmutableResolvers_NoStateBlock(t *testing.T) {
 	sol := &solution.Solution{
 		APIVersion: "scafctl.io/v1",
 		Kind:       "Solution",
@@ -1645,27 +1645,20 @@ func TestLintImmutableResolvers_NoStateProvider(t *testing.T) {
 				},
 			},
 		},
-		State: &state.Config{
-			Enabled: &spec.ValueRef{Literal: true},
-			Backend: state.Backend{
-				Provider: "file",
-				Inputs:   map[string]*spec.ValueRef{"path": {Literal: "state.json"}},
-			},
-		},
+		// No State block
 	}
 	reg := provider.NewRegistry()
 	_ = reg.Register(newFakeProvider("exec", nil))
-	_ = reg.Register(newStateProvider("file", provider.CapabilityState))
 
 	result := Solution(sol, "test.yaml", reg)
-	findings := filterFindingsByRule(result, "immutable-no-state-read")
+	findings := filterFindingsByRule(result, "immutable-requires-state")
 	require.Len(t, findings, 1)
 	assert.Contains(t, findings[0].Message, "cluster_id")
-	assert.Contains(t, findings[0].Message, "does not read from the state provider")
-	assert.Equal(t, SeverityWarning, findings[0].Severity)
+	assert.Contains(t, findings[0].Message, "no state block")
+	assert.Equal(t, SeverityError, findings[0].Severity)
 }
 
-func TestLintImmutableResolvers_WithStateProvider(t *testing.T) {
+func TestLintImmutableResolvers_WithStateBlock(t *testing.T) {
 	sol := &solution.Solution{
 		APIVersion: "scafctl.io/v1",
 		Kind:       "Solution",
@@ -1677,7 +1670,7 @@ func TestLintImmutableResolvers_WithStateProvider(t *testing.T) {
 					Immutable: true,
 					Resolve: &resolver.ResolvePhase{
 						With: []resolver.ProviderSource{
-							{Provider: "state", Inputs: map[string]*spec.ValueRef{"key": {Literal: "cluster_id"}}},
+							{Provider: "parameter"},
 							{Provider: "exec"},
 						},
 					},
@@ -1694,11 +1687,11 @@ func TestLintImmutableResolvers_WithStateProvider(t *testing.T) {
 	}
 	reg := provider.NewRegistry()
 	_ = reg.Register(newFakeProvider("exec", nil))
-	_ = reg.Register(newFakeProvider("state", nil))
+	_ = reg.Register(newFakeProvider("parameter", nil))
 	_ = reg.Register(newStateProvider("file", provider.CapabilityState))
 
 	result := Solution(sol, "test.yaml", reg)
-	findings := filterFindingsByRule(result, "immutable-no-state-read")
+	findings := filterFindingsByRule(result, "immutable-requires-state")
 	assert.Empty(t, findings)
 }
 
@@ -1720,19 +1713,12 @@ func TestLintImmutableResolvers_NotImmutable(t *testing.T) {
 				},
 			},
 		},
-		State: &state.Config{
-			Enabled: &spec.ValueRef{Literal: true},
-			Backend: state.Backend{
-				Provider: "http",
-				Inputs:   map[string]*spec.ValueRef{"url": {Literal: "https://state.example.com"}},
-			},
-		},
+		// No State block, but resolver is not immutable so no finding expected
 	}
 	reg := provider.NewRegistry()
 	_ = reg.Register(newFakeProvider("exec", nil))
-	_ = reg.Register(newStateProvider("http", provider.CapabilityState))
 
 	result := Solution(sol, "test.yaml", reg)
-	findings := filterFindingsByRule(result, "immutable-no-state-read")
+	findings := filterFindingsByRule(result, "immutable-requires-state")
 	assert.Empty(t, findings)
 }

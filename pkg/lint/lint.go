@@ -100,6 +100,7 @@ func Solution(sol *solution.Solution, filePath string, registry *provider.Regist
 	lintResolvers(sol, result, registry, referencedResolvers)
 	lintWorkflow(sol, result, registry)
 	lintState(sol, result, registry)
+	lintImmutableResolvers(sol, result)
 	lintTests(sol, filePath, result)
 	lintProviderInputs(sol, result, registry)
 
@@ -1101,7 +1102,6 @@ func lintState(sol *solution.Solution, result *Result, registry *provider.Regist
 		return
 	}
 	lintStateResolverRefs(sol, result)
-	lintImmutableResolvers(sol, result)
 }
 
 // lintStateBackend validates the backend provider configuration.
@@ -1167,31 +1167,19 @@ func lintStateResolverRefs(sol *solution.Solution, result *Result) {
 }
 
 // lintImmutableResolvers checks that resolvers with immutable: true have a
-// state provider in their resolve chain so that the locked value is read from
-// state on subsequent runs instead of re-executing and potentially diverging.
+// state block configured on the solution. Without state, immutable values
+// cannot be persisted or verified across runs.
 func lintImmutableResolvers(sol *solution.Solution, result *Result) {
 	for name, res := range sol.Spec.Resolvers {
 		if res == nil || !res.Immutable {
 			continue
 		}
-		location := fmt.Sprintf("resolvers.%s", name)
-
-		// Check if the resolve chain includes the state provider.
-		hasStateProvider := false
-		if res.Resolve != nil {
-			for _, src := range res.Resolve.With {
-				if src.Provider == "state" {
-					hasStateProvider = true
-					break
-				}
-			}
-		}
-
-		if !hasStateProvider {
-			result.addFinding(SeverityWarning, "state", location,
-				fmt.Sprintf("resolver %q has immutable: true but does not read from the state provider in its resolve chain", name),
-				"Add a state provider step at the start of the resolve chain to read the persisted value before falling back to other providers.",
-				"immutable-no-state-read")
+		if sol.State == nil {
+			location := fmt.Sprintf("resolvers.%s", name)
+			result.addFinding(SeverityError, "state", location,
+				fmt.Sprintf("resolver %q has immutable: true but no state block is configured on the solution", name),
+				"Add a state block with a backend provider to the solution so that the resolver value can be persisted.",
+				"immutable-requires-state")
 		}
 	}
 }

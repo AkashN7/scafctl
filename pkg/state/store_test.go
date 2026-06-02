@@ -107,6 +107,18 @@ func TestLoadFromFile_EmptyPath(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestLoadFromFile_UnsupportedSchemaVersion(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "future.json")
+	err := os.WriteFile(path, []byte(`{"schemaVersion":999,"metadata":{},"parameters":{}}`), 0o600)
+	require.NoError(t, err)
+
+	_, err = LoadFromFile(path)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrUnsupportedSchemaVersion)
+	assert.Contains(t, err.Error(), "999")
+}
+
 func TestSaveToFile_EmptyPath(t *testing.T) {
 	t.Parallel()
 	err := SaveToFile("", NewData())

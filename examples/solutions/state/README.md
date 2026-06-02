@@ -1,12 +1,13 @@
 # State Examples
 
-Demonstrates state persistence across solution executions.
+Demonstrates state persistence across solution executions using the
+parameter-replay pattern.
 
 ## solution.yaml
 
-A solution that persists resolver values to a local state file.
-On first run, values are collected via parameters. On subsequent runs,
-they are loaded from state automatically.
+A solution that persists CLI parameters to a local state file.
+On first run, values are provided via `-r` flags. On subsequent runs,
+saved parameters are automatically replayed via the parameter provider.
 
 ### First Run
 
@@ -17,7 +18,7 @@ scafctl run resolver -f solution.yaml -r username=alice -r env=prod
 ### Subsequent Runs
 
 ~~~sh
-# No parameters needed -- values come from state
+# No parameters needed -- saved parameters are replayed from state
 scafctl run resolver -f solution.yaml
 ~~~
 
@@ -25,7 +26,6 @@ scafctl run resolver -f solution.yaml
 
 ~~~sh
 scafctl state list --path state-example.json
-scafctl state get --path state-example.json --key username
 ~~~
 
 ### Clear State

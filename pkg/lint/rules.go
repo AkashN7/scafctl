@@ -354,21 +354,16 @@ var KnownRules = map[string]RuleMeta{
 		Why:         "State backends must implement CapabilityState. Using an unregistered or incompatible provider will fail at runtime.",
 		Fix:         "Use a registered provider with CapabilityState such as 'file' or 'http'. External providers like 'github' require an installed plugin.",
 	},
-	"state-circular-dependency": {
-		Rule:        "state-circular-dependency",
+	"immutable-requires-state": {
+		Rule:        "immutable-requires-state",
 		Severity:    string(SeverityError),
 		Category:    "state",
-		Description: "A resolver referenced by state.enabled or state.backend.inputs has saveToState or uses the state-reading provider.",
-		Why:         "State loading depends on these resolvers, but they would also read/write state, creating a circular dependency.",
-		Fix:         "Ensure resolvers referenced by state config do not have saveToState: true and do not use state backend providers.",
-	},
-	"sensitive-state": {
-		Rule:        "sensitive-state",
-		Severity:    string(SeverityWarning),
-		Category:    "security",
-		Description: "A resolver marked sensitive: true also has saveToState: true. The sensitive value will be stored in plaintext in the state file.",
-		Why:         "Sensitive values (API keys, tokens) saved to state are persisted unencrypted. This is intentional for validation replay but should be an explicit, informed decision.",
-		Fix:         "Acknowledge the risk or remove saveToState from sensitive resolvers. Consider using the secret provider for sensitive values that do not need state persistence.",
+		Description: "A resolver has immutable: true but the solution has no state block configured.",
+		Why:         "Without a state block and backend provider, there is nowhere to persist the locked resolver value. The immutable flag has no effect.",
+		Fix:         "Add a state block with a backend provider to the solution so that the resolver value can be persisted.",
+		Examples: []string{
+			"state:\n  enabled: true\n  backend:\n    provider: file\n    inputs:\n      path: \"my-state.json\"\n\nspec:\n  resolvers:\n    cluster_id:\n      type: string\n      immutable: true\n      resolve:\n        with:\n          - provider: parameter\n            inputs:\n              key: \"cluster_id\"\n          - provider: exec\n            inputs:\n              command: \"uuidgen\"",
+		},
 	},
 	"state-resolver-ref": {
 		Rule:        "state-resolver-ref",
@@ -377,28 +372,6 @@ var KnownRules = map[string]RuleMeta{
 		Description: "A state.enabled or state.backend.inputs field uses a direct rslvr: reference. State is loaded before resolvers run, so resolver results are not available.",
 		Why:         "State configuration is resolved before resolver execution using only CLI parameters (-r flags) and environment data. Direct rslvr: references will fail at runtime because resolver results do not exist yet.",
 		Fix:         "Use a CEL expression referencing CLI parameters instead, e.g.:\n  path:\n    expr: \"__params.appName + '-state.json'\"\nwhere appName is passed via -r appName=myapp.",
-	},
-	"immutable-without-save": {
-		Rule:        "immutable-without-save",
-		Severity:    string(SeverityWarning),
-		Category:    "state",
-		Description: "A resolver has immutable: true but saveToState is not true.",
-		Why:         "The immutable flag only affects state persistence. Without saveToState: true, the value is never written to state, so immutable has no effect.",
-		Fix:         "Either add saveToState: true to persist the value, or remove immutable: true.",
-		Examples: []string{
-			"resolvers:\n  cluster_id:\n    type: string\n    immutable: true\n    saveToState: true\n    resolve:\n      with:\n        - provider: state\n          inputs:\n            key: \"cluster_id\"\n            required: false\n        - provider: exec\n          inputs:\n            command: \"uuidgen\"",
-		},
-	},
-	"immutable-no-state-read": {
-		Rule:        "immutable-no-state-read",
-		Severity:    string(SeverityWarning),
-		Category:    "state",
-		Description: "A resolver has immutable: true and saveToState: true but does not read from the state provider in its resolve chain.",
-		Why:         "Without the state provider in the resolve chain, the resolver always re-executes its providers and attempts to overwrite the locked value. This causes an error instead of gracefully reusing the cached value.",
-		Fix:         "Add a state provider step at the start of the resolve chain to read the persisted value before falling back to other providers.",
-		Examples: []string{
-			"resolvers:\n  cluster_id:\n    type: string\n    immutable: true\n    saveToState: true\n    resolve:\n      with:\n        - provider: state        # read cached value first\n          inputs:\n            key: \"cluster_id\"\n            required: false\n        - provider: exec          # fallback: generate new value\n          inputs:\n            command: \"uuidgen\"",
-		},
 	},
 	"unused-suppression": {
 		Rule:        "unused-suppression",

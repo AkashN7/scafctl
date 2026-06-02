@@ -7,18 +7,17 @@
 # runs.
 #
 # How it works:
-#   - A resolver with immutable: true + saveToState: true locks its value
-#     in state after the first execution.
-#   - On subsequent runs, the state provider returns the locked value and
-#     the fallback chain stops -- the value is never regenerated.
-#   - Attempting to overwrite an immutable entry (via state set) produces
-#     an error. The only way to reset is scafctl state delete.
+#   - A resolver with immutable: true locks its resolved value in state
+#     after the first execution.
+#   - On subsequent runs, the resolver executes again and its value is
+#     compared against the locked value. If different, execution fails.
+#   - The only way to reset is scafctl state delete.
 #
 # Usage:
-#   # First run -- provide deployment ID and region, both saved to state
+#   # First run -- provide deployment ID and region via CLI parameters
 #   scafctl run resolver -f solution.yaml -r deployment_id=deploy-abc123 -r region=us-east-1
 #
-#   # Second run -- no parameters needed, both loaded from state
+#   # Second run -- parameters replayed from state, immutable value verified
 #   scafctl run resolver -f solution.yaml
 #
 #   # Inspect state to see immutable flag
@@ -27,8 +26,8 @@
 #   # Override region (mutable) -- works fine
 #   scafctl run resolver -f solution.yaml -r region=eu-west-1
 #
-#   # Try overriding deployment_id (immutable) via state set -- blocked!
-#   scafctl state set --path state-immutable-demo.json --key deployment_id --value "deploy-NEW"
+#   # Try overriding deployment_id (immutable) -- fails with mismatch error!
+#   scafctl run resolver -f solution.yaml -r deployment_id=deploy-NEW
 #
 #   # Delete the immutable entry to start fresh
 #   scafctl state delete --path state-immutable-demo.json --key deployment_id
@@ -55,24 +54,18 @@ spec:
     # =========================================================================
     # Immutable resolver -- locked after first write
     # =========================================================================
-    # On first run, the state provider returns ErrKeyNotFound (no state file exists),
-    # so the fallback chain continues via onError: continue to the parameter provider
-    # which asks for a deployment ID. The result is saved to state with immutable: true.
-    # On all subsequent runs, the state provider returns the locked value
-    # and the chain stops. The value can never change unless you manually
-    # delete the state entry.
+    # On first run, the parameter provider resolves the value (from -r flag).
+    # The immutable flag causes the resolved value to be locked in state.
+    # On subsequent runs, the resolver executes again (via parameter replay)
+    # and its value is compared against the locked entry. If the values differ,
+    # execution fails with an error. The value can never change unless you
+    # manually delete the state entry.
     deployment_id:
       description: Unique deployment identifier (locked after first generation)
       type: string
       immutable: true
-      saveToState: true
       resolve:
         with:
-          - provider: state
-            onError: continue
-            inputs:
-              key: "deployment_id"
-              required: true
           - provider: parameter
             inputs:
               key: "deployment_id"
@@ -80,26 +73,17 @@ spec:
     # =========================================================================
     # Mutable resolver -- can be updated on each run
     # =========================================================================
-    # This resolver also uses state persistence, but is NOT immutable.
-    # The parameter provider comes first, so passing -r region=<value>
-    # always overrides the state. If no parameter is given, the last saved
-    # value is used. On the very first run with no parameter, the static
-    # default "us-west-2" is used.
+    # This resolver is NOT immutable. Parameters are replayed from state,
+    # but passing -r region=<value> always overrides the replayed value.
+    # On the very first run with no parameter, the static default is used.
     region:
       description: Target deployment region (can be changed between runs)
       type: string
-      saveToState: true
       resolve:
         with:
           - provider: parameter
-            onError: continue
             inputs:
               key: "region"
-          - provider: state
-            onError: continue
-            inputs:
-              key: "region"
-              required: true
           - provider: static
             inputs:
               value: "us-west-2"
@@ -117,3 +101,13 @@ spec:
             inputs:
               value:
                 expr: "'Deployment ' + _.deployment_id + ' in ' + _.region"
+
+  workflow:
+    actions:
+      show-deployment:
+        description: Display deployment info with immutable ID
+        provider: message
+        inputs:
+          message:
+            expr: "_.deployment_info"
+          type: success

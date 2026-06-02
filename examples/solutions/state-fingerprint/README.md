@@ -10,19 +10,16 @@ when source files haven't changed.
 ### State
 
 | Feature | Where |
-|---------|-------|
+| --------- | ------- |
 | `state.enabled` + `state.backend` config | Top-level `state:` block |
-| `saveToState: true` on resolvers | `project_name`, `author`, `license_key` |
-| State provider read (fallback chain) | `state` -> `parameter` -> `static` pattern |
-| State provider write from actions | `increment-counter` action |
-| Computed resolvers using stateful values | `output_dir`, `file_header` |
-| Sensitive resolver + state warning | `license_key` (lint warning expected) |
-| `generation_count` read-only from state | Counter incremented by action |
+| Automatic parameter replay | CLI `-r` values saved and restored |
+| Computed resolvers using replayed values | `output_dir`, `file_header` |
+| Immutable resolver values (optional) | Shown in state-immutable example |
 
 ### Fingerprinting
 
 | Feature | Where |
-|---------|-------|
+| --------- | ------- |
 | `sources` glob patterns | `generate-code` action tracks `templates/**/*.tpl` |
 | `generates` glob patterns | `generate-code` action tracks `output/**/*.go` |
 | Skip on unchanged sources | Second run skips with "up-to-date" |
@@ -45,10 +42,11 @@ scafctl run solution -f solution.yaml -r project_name=myservice -r author=alice
 
 ### Second Run (Skipped)
 
-Actions are skipped because template sources haven't changed:
+Actions are skipped because template sources haven't changed.
+Parameters are replayed from state automatically (no -r needed):
 
 ~~~sh
-scafctl run solution -f solution.yaml -r project_name=myservice -r author=alice
+scafctl run solution -f solution.yaml
 ~~~
 
 ### Subsequent Runs (No Parameters Needed)
@@ -83,8 +81,6 @@ scafctl run solution -f solution.yaml --skip-fingerprint
 
 ~~~sh
 scafctl state list --path state-fingerprint-demo.json
-scafctl state get --path state-fingerprint-demo.json --key project_name
-scafctl state get --path state-fingerprint-demo.json --key generation_count
 ~~~
 
 ### Clear State
@@ -95,28 +91,26 @@ scafctl state clear --path state-fingerprint-demo.json
 
 ## How It Works
 
-```
+~~~text
 +----------------------------------------------------------------+
 |                     Solution Execution                          |
 +----------------------------------------------------------------+
 |                                                                 |
 |  1. State Load                                                  |
 |     +-- Read state-fingerprint-demo.json from disk              |
-|     +-- Inject into context (available to state provider)       |
+|     +-- Merge saved parameters into parameter provider          |
 |                                                                 |
 |  2. Resolver Execution                                          |
-|     +-- project_name: state -> parameter fallback               |
-|     +-- author: state -> parameter -> "anonymous"               |
-|     +-- license_key: state -> parameter -> "DEMO-KEY-12345"     |
-|     +-- generation_count: state read (fallback: "0")            |
+|     +-- project_name: parameter (replayed or -r flag)           |
+|     +-- author: parameter -> "anonymous" fallback               |
 |     +-- output_dir: CEL expression using project_name           |
 |     +-- file_header: CEL expression using multiple values       |
 |     +-- template_vars: composite of resolved values             |
 |     +-- template_files: read templates/ directory               |
 |     +-- rendered_files: render templates with variables         |
 |                                                                 |
-|  3. State Save (saveToState resolvers flushed atomically)       |
-|     +-- project_name, author, license_key written to state      |
+|  3. State Save (parameters persisted atomically)                |
+|     +-- CLI -r parameters merged into state                     |
 |                                                                 |
 |  4. Action Execution                                            |
 |     +-- generate-code:                                          |
@@ -124,13 +118,11 @@ scafctl state clear --path state-fingerprint-demo.json
 |     |   +-- If up-to-date -> SKIP                               |
 |     |   +-- If stale -> write rendered files to output/         |
 |     |   +-- Record new fingerprint (sources + generates)        |
-|     +-- increment-counter:                                      |
-|     |   +-- Write generation_count + 1 to state                 |
 |     +-- show-summary:                                           |
-|         +-- Display results using state-backed values           |
+|         +-- Display results using resolved values               |
 |                                                                 |
 |  5. State Final Save                                            |
-|     +-- Action state writes persisted to disk                   |
+|     +-- Fingerprint hashes persisted to disk                    |
 |                                                                 |
 +----------------------------------------------------------------+
-```
+~~~
