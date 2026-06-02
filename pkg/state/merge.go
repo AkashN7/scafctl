@@ -7,7 +7,7 @@ package state
 // CLI parameters take precedence (overwrite existing keys). New CLI keys are added.
 // Returns the effective parameter set for this execution.
 func MergeParameters(saved, cli map[string]any) map[string]any {
-	merged := make(map[string]any, len(saved)+len(cli))
+	merged := make(map[string]any)
 	for k, v := range saved {
 		merged[k] = v
 	}

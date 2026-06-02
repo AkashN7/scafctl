@@ -84,7 +84,7 @@ func CommandDelete(_ *settings.Run, _ *terminal.IOStreams, _ string) *cobra.Comm
 
 			err = fmt.Errorf("key %q not found in state", key)
 			w.Errorf("%v", err)
-			return exitcode.WithCode(err, exitcode.FileNotFound)
+			return exitcode.WithCode(err, exitcode.InvalidInput)
 		},
 	}
 

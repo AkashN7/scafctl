@@ -80,10 +80,10 @@ spec:
             message: "Render should use static fallback version"
 
       # =====================================================================
-      # Render does NOT load saved state (read-only preview uses defaults)
+      # Render loads saved state parameters (read-only replay)
       # =====================================================================
-      render-ignores-state:
-        description: Render does not load saved parameters -- uses resolver defaults
+      render-replays-state:
+        description: Render loads saved parameters so parameter provider serves persisted values
         command: [render, solution]
         args: ["-o", "json"]
         tags: [state, render]
@@ -98,10 +98,10 @@ spec:
           - command: "rm -rf /tmp/scafctl-it-state-rendersol-preseeded"
         assertions:
           - expression: __exitCode == 0
-          - expression: __output.actions["deploy"].inputs["command"].contains("default-target")
-            message: "Render uses static defaults even with state file present"
-          - expression: __output.actions["deploy"].inputs["command"].contains("0.0.1")
-            message: "Render uses static default version even with state file present"
+          - expression: __output.actions["deploy"].inputs["command"].contains("prod-cluster")
+            message: "Render should use persisted target from state"
+          - expression: __output.actions["deploy"].inputs["command"].contains("3.2.1")
+            message: "Render should use persisted version from state"
 
       # =====================================================================
       # Render does NOT write state (read-only)

@@ -89,8 +89,18 @@ func (p *FileProvider) executeStateSave(absPath string, inputs map[string]any) (
 	if err := tmp.Close(); err != nil {
 		return nil, fmt.Errorf("state save: close temp file: %w", err)
 	}
-	if err := os.Rename(tmpName, absPath); err != nil { //nolint:gosec // absPath validated by resolveStatePath
-		return nil, fmt.Errorf("state save: rename: %w", err)
+	renameErr := os.Rename(tmpName, absPath) //nolint:gosec // absPath validated by resolveStatePath
+	if renameErr != nil {
+		// Windows does not reliably support renaming over an existing file.
+		// Retry after removing the destination when it already exists.
+		if _, statErr := os.Stat(absPath); statErr == nil {
+			if removeErr := os.Remove(absPath); removeErr == nil {
+				renameErr = os.Rename(tmpName, absPath) //nolint:gosec // same rationale as above
+			}
+		}
+		if renameErr != nil {
+			return nil, fmt.Errorf("state save: rename: %w", renameErr)
+		}
 	}
 
 	return &provider.Output{

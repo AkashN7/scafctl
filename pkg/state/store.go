@@ -90,8 +90,18 @@ func SaveToFile(path string, sd *Data) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp file: %w", err)
 	}
-	if err := os.Rename(tmpName, absPath); err != nil { //nolint:gosec // absPath validated by ResolveStatePath
-		return fmt.Errorf("rename temp file: %w", err)
+	renameErr := os.Rename(tmpName, absPath) //nolint:gosec // absPath validated by ResolveStatePath
+	if renameErr != nil {
+		// Windows does not reliably support renaming over an existing file.
+		// Retry after removing the destination when it already exists.
+		if _, statErr := os.Stat(absPath); statErr == nil {
+			if removeErr := os.Remove(absPath); removeErr == nil {
+				renameErr = os.Rename(tmpName, absPath) //nolint:gosec // same rationale as above
+			}
+		}
+		if renameErr != nil {
+			return fmt.Errorf("rename temp file: %w", renameErr)
+		}
 	}
 
 	return nil

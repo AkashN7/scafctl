@@ -89,7 +89,7 @@ func CommandGet(cliParams *settings.Run, ioStreams *terminal.IOStreams, _ string
 
 			err = fmt.Errorf("key %q not found in state", opts.Key)
 			w.Errorf("%v", err)
-			return exitcode.WithCode(err, exitcode.FileNotFound)
+			return exitcode.WithCode(err, exitcode.InvalidInput)
 		},
 	}
 

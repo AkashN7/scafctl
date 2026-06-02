@@ -327,7 +327,7 @@ func (o *SolutionOptions) runActionGraph(ctx context.Context, lgr logr.Logger) e
 
 		// State lifecycle: load persisted state before resolver execution so
 		// the state provider can serve previously saved values (read-only).
-		ctx, err = o.loadStateIntoContext(ctx, sol, reg, params)
+		ctx, params, err = o.loadStateIntoContext(ctx, sol, reg, params)
 		if err != nil {
 			return o.exitWithCode(err, exitcode.GeneralError)
 		}
@@ -421,7 +421,7 @@ func (o *SolutionOptions) runActionGraphVisualization(ctx context.Context, lgr l
 
 		// State lifecycle: load persisted state before resolver execution so
 		// the state provider can serve previously saved values (read-only).
-		ctx, err = o.loadStateIntoContext(ctx, sol, reg, params)
+		ctx, params, err = o.loadStateIntoContext(ctx, sol, reg, params)
 		if err != nil {
 			return o.exitWithCode(err, exitcode.GeneralError)
 		}
@@ -478,7 +478,7 @@ func (o *SolutionOptions) runSnapshot(ctx context.Context, lgr logr.Logger) erro
 
 	// State lifecycle: load persisted state before resolver execution so
 	// the state provider can serve previously saved values (read-only).
-	ctx, err = o.loadStateIntoContext(ctx, sol, o.getRegistry(ctx), params)
+	ctx, params, err = o.loadStateIntoContext(ctx, sol, o.getRegistry(ctx), params)
 	if err != nil {
 		return o.exitWithCode(err, exitcode.GeneralError)
 	}
@@ -761,10 +761,11 @@ type solutionResolverRegistryAdapter = solrender.ResolverRegistryAdapter
 
 // loadStateIntoContext loads persisted state into the context for read-only
 // access by the state provider during resolver execution. State is never saved
-// in render mode. Returns the updated context (or original if state is disabled/skipped).
-func (o *SolutionOptions) loadStateIntoContext(ctx context.Context, sol *solution.Solution, reg *provider.Registry, params map[string]any) (context.Context, error) {
+// in render mode. Returns the updated context and merged parameters (saved + CLI)
+// so the parameter provider can replay previously saved values.
+func (o *SolutionOptions) loadStateIntoContext(ctx context.Context, sol *solution.Solution, reg *provider.Registry, params map[string]any) (context.Context, map[string]any, error) {
 	if sol.State == nil {
-		return ctx, nil
+		return ctx, params, nil
 	}
 
 	stateMgr := state.NewManager(sol.State, reg, settings.VersionInformation.BuildVersion)
@@ -774,12 +775,13 @@ func (o *SolutionOptions) loadStateIntoContext(ctx context.Context, sol *solutio
 	}
 	loadResult, err := stateMgr.Load(ctx, params, cmdInfo)
 	if err != nil {
-		return ctx, fmt.Errorf("state load: %w", err)
+		return ctx, params, fmt.Errorf("state load: %w", err)
 	}
 	if !loadResult.Skipped {
 		ctx = loadResult.Ctx
+		params = loadResult.MergedParams
 	}
-	return ctx, nil
+	return ctx, params, nil
 }
 
 // formatParams converts resolver parameters to string map for state command info.
